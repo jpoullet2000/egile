@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ecommerce": {
+      "command": "python",
+      "args": ["/home/jbp/projects/egile/ecommerce-mcp-server.py"],
+      "env": {}
+    }
+  }
+}

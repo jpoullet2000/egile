@@ -1,0 +1,25 @@
+{
+  "name": "ecommerce-mcp-server",
+  "version": "0.1.0",
+  "description": "Generic E-commerce MCP Server providing tools for product, customer, and order management",
+  "main": "ecommerce-mcp-server.py",
+  "scripts": {
+    "start": "python ecommerce-mcp-server.py"
+  },
+  "dependencies": {
+    "mcp": "^1.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "ecommerce",
+    "products",
+    "orders",
+    "customers",
+    "inventory"
+  ],
+  "author": "MCP E-commerce Server",
+  "license": "MIT",
+  "python": {
+    "requires": ">=3.8"
+  }
+}
