@@ -107,6 +107,37 @@ ecommerce> list orders
 ecommerce> order get order_000001
 ```
 
+## 🤖 Web Chatbot Interface
+
+### Quick Start with Chatbot
+```bash
+# Start the web-based chatbot
+python run_chatbot.py
+```
+
+The chatbot will:
+1. Start the WebSocket bridge server
+2. Open the chatbot interface in your browser
+3. Connect to the MCP server automatically
+
+### Chatbot Features
+- **Natural Language Interface**: Type commands naturally
+- **Real-time Communication**: Instant responses via WebSocket
+- **Rich Formatting**: Nicely formatted product lists, orders, etc.
+- **Quick Actions**: Pre-built buttons for common tasks
+- **Auto-reconnection**: Handles connection drops gracefully
+
+### Chatbot Commands
+Use natural language or specific commands:
+- `"list products"` - Show all products
+- `"create product 'Widget' 29.99 WID-001 Electronics 50"` - Create product
+- `"search products wireless"` - Search for products
+- `"list customers"` - Show all customers
+- `"create customer john@example.com 'John' 'Doe' '+1-555-0123'"` - Create customer
+- `"list orders"` - Show all orders
+- `"stock low"` - Show low stock items
+- `"help"` - Show all available commands
+
 ## 🔧 CLI Command Reference
 
 ### Product Commands

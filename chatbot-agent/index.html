@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grok AI E-commerce Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #6B73FF 0%, #000DFF 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chat-container {
+            width: 90%;
+            max-width: 900px;
+            height: 90vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #6B73FF 0%, #000DFF 100%);
+            color: white;
+            padding: 25px;
+            text-align: center;
+            position: relative;
+        }
+
+        .chat-header::before {
+            content: '🤖';
+            font-size: 2rem;
+            position: absolute;
+            left: 25px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .chat-header h1 {
+            font-size: 1.6rem;
+            margin-bottom: 5px;
+            font-weight: 700;
+        }
+
+        .chat-header p {
+            opacity: 0.9;
+            font-size: 0.95rem;
+        }
+
+        .grok-badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            margin-top: 8px;
+            backdrop-filter: blur(10px);
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 25px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 20px;
+            display: flex;
+            align-items: flex-start;
+            animation: fadeInUp 0.3s ease-out;
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 75%;
+            padding: 15px 20px;
+            border-radius: 20px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+            position: relative;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            border: 1px solid #e1e5e9;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            margin-right: 15px;
+        }
+
+        .message.bot .message-content::before {
+            content: '🤖';
+            position: absolute;
+            left: -35px;
+            top: 10px;
+            font-size: 1.2rem;
+            background: white;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #6B73FF 0%, #000DFF 100%);
+            color: white;
+            margin-left: 15px;
+        }
+
+        .message.user .message-content::after {
+            content: '👤';
+            position: absolute;
+            right: -35px;
+            top: 10px;
+            font-size: 1.2rem;
+            background: white;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .message.system .message-content {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            font-style: italic;
+            text-align: center;
+            margin: 0 auto;
+        }
+
+        .connection-status {
+            padding: 12px 25px;
+            text-align: center;
+            font-size: 0.85rem;
+            background: linear-gradient(135deg, #00D4AA 0%, #00A085 100%);
+            color: white;
+            font-weight: 600;
+        }
+
+        .connection-status.disconnected {
+            background: linear-gradient(135deg, #FF6B6B 0%, #EE5A52 100%);
+        }
+
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 20px;
+            padding-left: 50px;
+        }
+
+        .typing-content {
+            background: white;
+            border: 1px solid #e1e5e9;
+            border-radius: 20px;
+            padding: 15px 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            background: #6B73FF;
+            border-radius: 50%;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-8px); }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .chat-input {
+            padding: 25px;
+            background: white;
+            border-top: 1px solid #e1e5e9;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 15px;
+            align-items: flex-end;
+        }
+
+        #messageInput {
+            flex: 1;
+            padding: 15px 20px;
+            border: 2px solid #e1e5e9;
+            border-radius: 25px;
+            outline: none;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            resize: none;
+            min-height: 50px;
+            max-height: 120px;
+            font-family: inherit;
+        }
+
+        #messageInput:focus {
+            border-color: #6B73FF;
+            box-shadow: 0 0 0 3px rgba(107, 115, 255, 0.1);
+        }
+
+        #sendButton {
+            padding: 15px 25px;
+            background: linear-gradient(135deg, #6B73FF 0%, #000DFF 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            min-width: 80px;
+        }
+
+        #sendButton:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(107, 115, 255, 0.3);
+        }
+
+        #sendButton:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .quick-actions {
+            padding: 15px 25px;
+            background: #f8f9fa;
+            border-top: 1px solid #e1e5e9;
+        }
+
+        .quick-actions-title {
+            font-size: 0.85rem;
+            color: #6c757d;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .quick-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .quick-button {
+            padding: 8px 16px;
+            background: white;
+            border: 1px solid #e1e5e9;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+
+        .quick-button:hover {
+            background: linear-gradient(135deg, #6B73FF 0%, #000DFF 100%);
+            color: white;
+            border-color: #6B73FF;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(107, 115, 255, 0.3);
+        }
+
+        .ai-thinking {
+            font-style: italic;
+            color: #6B73FF;
+            font-size: 0.9rem;
+        }
+
+        /* Scrollbar styling */
+        .chat-messages::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .chat-messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: #6B73FF;
+            border-radius: 3px;
+        }
+
+        .chat-messages::-webkit-scrollbar-thumb:hover {
+            background: #000DFF;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>Grok AI E-commerce Assistant</h1>
+            <p>Powered by Grok 3 - Ask me anything about your store!</p>
+            <div class="grok-badge">🚀 AI-Powered</div>
+        </div>
+        
+        <div id="connectionStatus" class="connection-status disconnected">
+            Connecting to Grok AI agent...
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot">
+                <div class="message-content">
+                    Hello! I'm your AI-powered e-commerce assistant, enhanced with Grok 3. I can help you:
+                    <br><br>
+                    • 🛍️ <strong>Manage products</strong> - Create, search, and update your inventory
+                    <br>• 👥 <strong>Handle customers</strong> - View and manage customer information  
+                    <br>• 📋 <strong>Process orders</strong> - Create and track customer orders
+                    <br>• 📊 <strong>Monitor inventory</strong> - Check stock levels and get alerts
+                    <br>• 💬 <strong>Natural conversation</strong> - Just ask me in plain English!
+                    <br><br>
+                    Try asking: <em>"What products are running low on stock?"</em> or <em>"Show me our top customers"</em>
+                </div>
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typingIndicator">
+            <div class="typing-content">
+                <div class="ai-thinking">Grok is thinking...</div>
+                <div class="typing-dots">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="quick-actions">
+            <div class="quick-actions-title">💡 Quick Actions:</div>
+            <div class="quick-buttons">
+                <div class="quick-button" onclick="sendQuickMessage('Show me all products')">📦 All Products</div>
+                <div class="quick-button" onclick="sendQuickMessage('List all customers')">👥 All Customers</div>
+                <div class="quick-button" onclick="sendQuickMessage('Show me recent orders')">📋 Recent Orders</div>
+                <div class="quick-button" onclick="sendQuickMessage('What products are low in stock?')">⚠️ Low Stock</div>
+                <div class="quick-button" onclick="sendQuickMessage('Help me create a new product')">➕ New Product</div>
+            </div>
+        </div>
+
+        <div class="chat-input">
+            <div class="input-container">
+                <textarea id="messageInput" placeholder="Ask me anything about your e-commerce store..." onkeypress="handleKeyPress(event)" rows="1"></textarea>
+                <button id="sendButton" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
