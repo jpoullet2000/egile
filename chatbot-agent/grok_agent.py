@@ -81,7 +81,28 @@ class GrokEcommerceAgent:
                     )
                     return action_result
 
-                # Generate a conversational response with Grok 3
+                # For data retrieval actions, use fallback formatting without Grok
+                data_actions = [
+                    "list_products",
+                    "list_customers",
+                    "list_orders",
+                    "get_low_stock_products",
+                    "search_products",
+                    "get_product",
+                    "get_customer",
+                    "get_order",
+                ]
+                if action in data_actions:
+                    # Use direct fallback formatting for data display
+                    response = self.fallback_response_generation(
+                        intent_analysis, action_result
+                    )
+                    self.conversation_history.append(
+                        {"role": "assistant", "content": response.get("message", "")}
+                    )
+                    return response
+
+                # Generate a conversational response with Grok 3 for other actions
                 response = await self.generate_response_with_grok(
                     user_message, intent_analysis, action_result
                 )
@@ -933,6 +954,33 @@ Guidelines:
                     message += f"... and {len(data) - 5} more customers."
             else:
                 message = "👥 No customers found. Ready to add your first customer?"
+
+        elif action == "list_orders":
+            if data and len(data) > 0:
+                message = f"📋 I found {len(data)} order(s):\n\n"
+                for order in data[:5]:
+                    # Debug: Check what type of object we have
+                    logger.info(f"Order object type: {type(order)}")
+                    logger.info(f"Order object: {order}")
+
+                    # Handle dict objects (should be parsed JSON now)
+                    if isinstance(order, dict):
+                        customer_name = f"{order.get('customer', {}).get('first_name', 'Unknown')} {order.get('customer', {}).get('last_name', '')}"
+                        product_name = order.get("product", {}).get(
+                            "name", "Unknown Product"
+                        )
+                        message += f"• **Order #{order.get('id')}** - {customer_name}\n"
+                        message += f"  📦 {order.get('quantity')} x {product_name}\n"
+                        message += f"  💰 ${order.get('total_amount'):.2f} | Status: {order.get('status')}\n"
+                        message += f"  📅 {order.get('created_at', '')[:10]}\n\n"
+                    elif hasattr(order, "id"):
+                        # Dataclass object (backup)
+                        message += f"• **Order #{order.id}**\n"
+                        message += f"  📦 {order.quantity} items | 💰 ${order.total_amount:.2f}\n\n"
+                if len(data) > 5:
+                    message += f"... and {len(data) - 5} more orders."
+            else:
+                message = "📋 No orders found yet. Ready to process your first order?"
 
         elif action == "get_low_stock_products":
             if data and len(data) > 0:
