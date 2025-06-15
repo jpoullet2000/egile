@@ -71,7 +71,13 @@ class GrokEcommerceAgent:
 
                 # For interactive actions, return the result directly without Grok processing
                 action = intent_analysis.get("action")
-                if action in ["help_create_product", "request_product_details"]:
+                interactive_actions = [
+                    "help_create_product",
+                    "request_product_details",
+                    "help_find_customer",
+                    "help_choose_customer_contact",
+                ]
+                if action in interactive_actions:
                     # Add assistant response to conversation history
                     self.conversation_history.append(
                         {
@@ -144,6 +150,9 @@ For example:
 - "most expensive products" = list_products with sort_by: "price_desc"
 - "cheapest products" = list_products with sort_by: "price_asc"
 - "products by price" = list_products with sort_by: "price_desc"
+- "how can I contact the customer?" = help_choose_customer_contact (show customer list)
+- "contact customer john@example.com" = get_customer with identifier: "john@example.com", search_by: "email"
+- "customer details for john@example.com" = get_customer with identifier: "john@example.com", search_by: "email"
 - "who are my customers?" = list_customers
 - "show me orders" = list_orders
 - "what's running low?" = get_low_stock_products
@@ -158,7 +167,7 @@ Available operations:
 - search_products: Search products (needs: query)
 - list_customers: Show all customers
 - create_customer: Create customer (needs: email, first_name, last_name, optional: phone)
-- get_customer: Get customer details (needs: customer_id or email)
+- get_customer: Get customer details (needs: identifier and search_by: "id"|"email")
 - list_orders: Show all orders
 - create_order: Create order (needs: customer_id, product_id, quantity)
 - get_order: Get order details (needs: order_id)
@@ -174,6 +183,7 @@ IMPORTANT:
 - If someone asks about creating/adding products but doesn't provide all details, use help_create_product
 - If they provide partial details, extract what you can and set action to create_product
 - For product creation, try to extract: name, description, price, sku, category, stock_quantity
+- For get_customer, always use "identifier" and "search_by" parameters, not "email" or "customer_id" directly
 
 Respond with JSON format:
 {
@@ -337,6 +347,97 @@ Respond with JSON format:
         if any(pattern in message_lower for pattern in customer_list_patterns):
             return {
                 "intent": "List all customers",
+                "action": "list_customers",
+                "parameters": {},
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        # Customer contact/communication patterns
+        customer_contact_patterns = [
+            "how can i contact",
+            "contact the customer",
+            "contact customer",
+            "contact",  # Added standalone "contact"
+            "how to reach",
+            "customer contact",
+            "customer info",
+            "customer details",
+            "reach out to customer",
+            "get in touch with",
+            "communicate with customer",
+        ]
+
+        if any(pattern in message_lower for pattern in customer_contact_patterns):
+            # Check if a specific customer is mentioned (email or name)
+            import re
+
+            # Look for email patterns
+            email_match = re.search(
+                r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", message_lower
+            )
+            # Look for customer names in quotes
+            name_match = re.search(r'["\']([^"\']+)["\']', message)
+            # Look for customer ID patterns
+            id_match = re.search(
+                r"\b(?:customer|id|#)\s*:?\s*([a-zA-Z0-9_-]+)", message_lower
+            )
+
+            if email_match:
+                return {
+                    "intent": f"Get contact details for customer: {email_match.group()}",
+                    "action": "get_customer",
+                    "parameters": {
+                        "identifier": email_match.group(),
+                        "search_by": "email",
+                    },
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+            elif name_match:
+                # This is tricky - we can't search by name directly, so suggest listing customers
+                return {
+                    "intent": f"Find customer contact info for: {name_match.group(1)}",
+                    "action": "help_find_customer",
+                    "parameters": {"search_name": name_match.group(1)},
+                    "requires_action": True,
+                    "confidence": 0.8,
+                }
+            elif id_match:
+                return {
+                    "intent": f"Get contact details for customer ID: {id_match.group(1)}",
+                    "action": "get_customer",
+                    "parameters": {"identifier": id_match.group(1), "search_by": "id"},
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+            else:
+                # General customer contact query - show list of customers
+                return {
+                    "intent": "Show customers to choose who to contact",
+                    "action": "help_choose_customer_contact",
+                    "parameters": {},
+                    "requires_action": True,
+                    "confidence": 0.8,
+                }
+
+        # Phone number query patterns
+        phone_patterns = [
+            "phone number",
+            "phone numbers",
+            "any phone",
+            "contact number",
+            "telephone",
+            "call them",
+            "how to call",
+            "phone info",
+            "phone details",
+        ]
+
+        if any(pattern in message_lower for pattern in phone_patterns):
+            # If asking about phone numbers in general, show customer list with phone info
+            return {
+                "intent": "Show customer phone numbers",
                 "action": "list_customers",
                 "parameters": {},
                 "requires_action": True,
@@ -808,6 +909,8 @@ Want to create another product? Just say "create a new product" or "help me crea
             "list_customers": "get_all_customers",
             "create_customer": "create_customer",
             "get_customer": "get_customer",
+            "help_find_customer": "help_find_customer",
+            "help_choose_customer_contact": "help_choose_customer_contact",
             "list_orders": "get_all_orders",
             "create_order": "create_order",
             "get_order": "get_order",
@@ -823,6 +926,10 @@ Want to create another product? Just say "create a new product" or "help me crea
             return await self.help_create_product()
         elif action == "request_product_details":
             return await self.request_product_details(parameters)
+        elif action == "help_find_customer":
+            return await self.help_find_customer(parameters)
+        elif action == "help_choose_customer_contact":
+            return await self.help_choose_customer_contact()
 
         method_name = action_mapping[action]
         method = getattr(self.ecommerce_agent, method_name)
@@ -839,8 +946,10 @@ Want to create another product? Just say "create a new product" or "help me crea
 
         # Execute the method
         if parameters:
+            logger.info(f"Calling {method_name} with parameters: {parameters}")
             result = await method(**parameters)
         else:
+            logger.info(f"Calling {method_name} with no parameters")
             result = await method()
 
         # Post-process the result if sorting was requested
@@ -848,7 +957,9 @@ Want to create another product? Just say "create a new product" or "help me crea
             logger.info(f"Post-processing list_products with sort_info: {sort_info}")
             result = await self.post_process_product_list(result, sort_info)
         else:
-            logger.info(f"No post-processing needed. sort_info: {sort_info}, action: {action}")
+            logger.info(
+                f"No post-processing needed. sort_info: {sort_info}, action: {action}"
+            )
 
         # Extract data from AgentResponse for JSON serialization
         if hasattr(result, "data"):
@@ -1036,12 +1147,28 @@ Guidelines:
 
                     # Handle dict objects (should be parsed JSON now)
                     if isinstance(customer, dict):
-                        message += f"• **{customer.get('first_name')} {customer.get('last_name')}**\n"
-                        message += f"  📧 {customer.get('email')}\n\n"
+                        name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                        email = customer.get("email", "")
+                        phone = customer.get("phone", "")
+
+                        message += f"• **{name}**\n"
+                        message += f"  📧 {email}\n"
+                        if phone:
+                            message += f"  📱 {phone}\n"
+                        else:
+                            message += "  📱 No phone number\n"
+                        message += "\n"
                     elif hasattr(customer, "first_name"):
                         # Dataclass object (backup)
-                        message += f"• **{customer.first_name} {customer.last_name}**\n"
-                        message += f"  📧 {customer.email}\n\n"
+                        name = f"{customer.first_name} {customer.last_name}".strip()
+                        phone = getattr(customer, "phone", None)
+                        message += f"• **{name}**\n"
+                        message += f"  📧 {customer.email}\n"
+                        if phone:
+                            message += f"  📱 {phone}\n"
+                        else:
+                            message += "  📱 No phone number\n"
+                        message += "\n"
                 if len(data) > 5:
                     message += f"... and {len(data) - 5} more customers."
             else:
@@ -1097,11 +1224,113 @@ Guidelines:
             "action_result": action_result,
         }
 
+    async def help_find_customer(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Help find a specific customer by name"""
+        search_name = parameters.get("search_name", "")
+        return {
+            "type": "chat_response",
+            "action": "help_find_customer",
+            "success": True,
+            "message": f"""🔍 I'd love to help you find contact info for "{search_name}"!
+
+However, I can only search customers by email address or customer ID, not by name directly.
+
+📋 **Here are your options:**
+
+1. **Show all customers**: I can display your customer list so you can find "{search_name}"
+   Just say: "show me all customers"
+
+2. **Search by email**: If you know their email, I can get their details
+   Example: "get customer john@example.com"
+
+3. **Search by customer ID**: If you know their ID
+   Example: "get customer cust_123456"
+
+Would you like me to show your customer list to help you find "{search_name}"? 👥""",
+        }
+
+    async def help_choose_customer_contact(self) -> Dict[str, Any]:
+        """Help user choose which customer to contact by showing customer list"""
+        try:
+            # Get all customers first
+            customers_result = await self.ecommerce_agent.get_all_customers()
+
+            if customers_result.success and customers_result.data:
+                # Parse customer data
+                processed_data = customers_result.data
+                if (
+                    isinstance(processed_data, list)
+                    and len(processed_data) > 0
+                    and isinstance(processed_data[0], dict)
+                    and processed_data[0].get("type") == "text"
+                ):
+                    try:
+                        import json
+
+                        json_text = processed_data[0]["text"]
+                        customers = json.loads(json_text)
+                        logger.info(f"Parsed {len(customers)} customers from JSON")
+                    except (json.JSONDecodeError, KeyError):
+                        customers = processed_data
+                else:
+                    customers = processed_data
+
+                if customers and len(customers) > 0:
+                    message = """📞 **Customer Contact Directory**
+
+Here are your customers. To get contact details for any of them, just ask:
+"get customer [email]" or "contact [email]"
+
+👥 **Your Customers:**
+
+"""
+                    for customer in customers[:10]:  # Show first 10
+                        if isinstance(customer, dict):
+                            name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                            email = customer.get("email", "")
+                            phone = customer.get("phone", "No phone")
+                            message += f"• **{name}**\n"
+                            message += f"  📧 {email}\n"
+                            message += f"  📱 {phone}\n\n"
+
+                    if len(customers) > 10:
+                        message += f"... and {len(customers) - 10} more customers.\n\n"
+
+                    message += """💡 **To get full contact details, try:**
+• "get customer john@example.com"
+• "contact customer sarah@company.com"
+• "customer details for mike@business.com" """
+
+                    return {
+                        "type": "chat_response",
+                        "action": "help_choose_customer_contact",
+                        "success": True,
+                        "message": message,
+                    }
+                else:
+                    return {
+                        "type": "chat_response",
+                        "action": "help_choose_customer_contact",
+                        "success": True,
+                        "message": "👥 You don't have any customers yet. Would you like to add your first customer?",
+                    }
+            else:
+                return {
+                    "type": "error",
+                    "message": "❌ Unable to retrieve customer list. Please try again.",
+                }
+
+        except Exception as e:
+            return {
+                "type": "error",
+                "message": f"❌ Error retrieving customers: {str(e)}",
+            }
+
     async def post_process_product_list(self, result, sort_info: Dict[str, Any]):
         """Post-process product list to apply sorting and filtering"""
         try:
             logger.info(f"Post-processing with sort_info: {sort_info}")
-            
+
             # Extract and parse the product data
             if hasattr(result, "data"):
                 processed_data = result.data
@@ -1135,10 +1364,15 @@ Guidelines:
                 if sort_by == "price_desc" or sort_by == "price":
                     # Sort by price descending (most expensive first)
                     products.sort(key=lambda x: float(x.get("price", 0)), reverse=True)
-                    logger.info(f"Sorted by price desc. First product: {products[0].get('name')} - ${products[0].get('price')}")
+                    logger.info(
+                        f"Sorted by price desc. First product: {products[0].get('name')} - ${products[0].get('price')}"
+                    )
                 elif sort_by == "price_asc":
                     # Sort by price ascending (cheapest first)
                     products.sort(key=lambda x: float(x.get("price", 0)), reverse=False)
+                    logger.info(
+                        f"Sorted by price asc. First product: {products[0].get('name')} - ${products[0].get('price')}"
+                    )
                 elif sort_by == "name":
                     # Sort by name alphabetically
                     products.sort(key=lambda x: x.get("name", "").lower())
