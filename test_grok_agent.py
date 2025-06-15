@@ -22,45 +22,33 @@ async def test_grok_agent():
     await agent.start()
 
     try:
-        print("\n=== Testing product listing ===")
-        response = await agent.process_message("show me all products")
+        print("\n=== Testing product creation help ===")
+        response = await agent.process_message("Help me create a new product")
         print(f"Response type: {type(response)}")
         print(
             f"Response keys: {response.keys() if isinstance(response, dict) else 'Not a dict'}"
         )
         if isinstance(response, dict):
-            print(f"Message: {response.get('message', 'No message')[:200]}...")
-            if "action_result" in response:
-                action_result = response["action_result"]
-                print(f"Action result success: {action_result.get('success')}")
-                print(
-                    f"Action result data length: {len(action_result.get('data', []))}"
-                )
-                if action_result.get("data"):
-                    first_item = action_result["data"][0]
-                    print(f"First item type: {type(first_item)}")
-                    if isinstance(first_item, dict):
-                        print(f"First item keys: {first_item.keys()}")
+            print(f"Message: {response.get('message', 'No message')}")
+            print(f"Type: {response.get('type', 'No type')}")
 
-        print("\n=== Testing customer listing ===")
-        response2 = await agent.process_message("show me all customers")
+        print("\n=== Testing product creation with details ===")
+        response2 = await agent.process_message(
+            'Create product "Test iPhone" with description "Latest smartphone", price $999.99, SKU IP-TEST-001, category Electronics, stock 25'
+        )
         print(f"Response type: {type(response2)}")
         print(
             f"Response keys: {response2.keys() if isinstance(response2, dict) else 'Not a dict'}"
         )
         if isinstance(response2, dict):
-            print(f"Message: {response2.get('message', 'No message')[:200]}...")
-            if "action_result" in response2:
-                action_result = response2["action_result"]
-                print(f"Action result success: {action_result.get('success')}")
-                print(
-                    f"Action result data length: {len(action_result.get('data', []))}"
-                )
-                if action_result.get("data"):
-                    first_item = action_result["data"][0]
-                    print(f"First item type: {type(first_item)}")
-                    if isinstance(first_item, dict):
-                        print(f"First item keys: {first_item.keys()}")
+            print(f"Message: {response2.get('message', 'No message')}")
+            print(f"Type: {response2.get('type', 'No type')}")
+
+        print("\n=== Testing simple product listing ===")
+        response3 = await agent.process_message("show me all products")
+        print(f"Response type: {type(response3)}")
+        if isinstance(response3, dict):
+            print(f"Message: {response3.get('message', 'No message')[:200]}...")
 
     except Exception as e:
         print(f"Error during test: {e}")
