@@ -2018,16 +2018,18 @@ Guidelines:
         elif action == "update_stock":
             # Enhanced stock update response with complete product details
             try:
-                # Get the product_id and new stock from parameters and action result
+                # Get the product_id from parameters
                 params = intent_analysis.get("parameters", {})
                 product_id = params.get("product_id")
-                quantity_param = params.get("quantity")
 
                 # If we have product_id, fetch complete details
                 if product_id:
                     product_details = await self.get_product_details(product_id)
 
                     if product_details:
+                        # Get the actual current stock level from the database
+                        current_stock = product_details.get('stock_quantity', 0)
+                        
                         # Create detailed confirmation message
                         message = "📦 **Stock Updated Successfully!**\n\n"
                         message += "**Product Details:**\n"
@@ -2041,14 +2043,12 @@ Guidelines:
                         message += f"• **Category:** {product_details.get('category', 'Unknown')}\n"
                         if product_details.get("description"):
                             message += f"• **Description:** {product_details.get('description')}\n"
-                        message += f"• **New Stock Level:** {quantity_param} units\n\n"
+                        message += f"• **New Stock Level:** {current_stock} units\n\n"
                         message += "✅ Your inventory has been updated!"
                     else:
                         # Fallback if product details can't be fetched
                         message = "📦 **Stock Updated Successfully!**\n\n"
-                        message += (
-                            f"Stock updated for {product_id}: {quantity_param} units"
-                        )
+                        message += f"Stock updated for {product_id}"
                 else:
                     # Fallback to basic response
                     message = "📦 **Stock Updated Successfully!**\n\nYour inventory has been updated!"
