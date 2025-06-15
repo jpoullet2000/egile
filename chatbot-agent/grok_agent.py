@@ -103,7 +103,7 @@ class GrokEcommerceAgent:
                 ]
                 if action in data_actions:
                     # Use direct fallback formatting for data display
-                    response = self.fallback_response_generation(
+                    response = await self.fallback_response_generation(
                         intent_analysis, action_result
                     )
                     self.conversation_history.append(
@@ -1529,7 +1529,7 @@ Want to create another product? Just say "create a new product" or "help me crea
         """Generate a conversational response using Grok 3"""
         if not self.grok_api_key:
             # Fallback to simple response formatting
-            return self.fallback_response_generation(intent_analysis, action_result)
+            return await self.fallback_response_generation(intent_analysis, action_result)
 
         try:
             import httpx
@@ -1593,15 +1593,15 @@ Guidelines:
                     }
                 else:
                     logger.warning(f"Grok API error: {response.status_code}")
-                    return self.fallback_response_generation(
+                    return await self.fallback_response_generation(
                         intent_analysis, action_result
                     )
 
         except Exception as e:
             logger.warning(f"Failed to generate response with Grok: {e}")
-            return self.fallback_response_generation(intent_analysis, action_result)
+            return await self.fallback_response_generation(intent_analysis, action_result)
 
-    def fallback_response_generation(
+    async def fallback_response_generation(
         self,
         intent_analysis: Dict[str, Any],
         action_result: Optional[Dict[str, Any]] = None,
@@ -2012,82 +2012,40 @@ Guidelines:
             else:
                 message = "🎉 **Order Created Successfully!**\n\nYour order has been placed and will be processed shortly."
         elif action == "update_stock":
-            # Provide specific feedback for stock updates
-            if data and len(data) > 0:
-                try:
-                    import json
-
-                    response_text = data[0].get("text", "")
-
-                    # Try to extract product information from the response
-                    if "Stock updated for product" in response_text:
-                        message = (
-                            f"📦 **Stock Updated Successfully!**\n\n{response_text}"
-                        )
+            # Enhanced stock update response with complete product details
+            try:
+                # Get the product_id and new stock from parameters and action result
+                params = intent_analysis.get("parameters", {})
+                product_id = params.get("product_id")
+                quantity_param = params.get("quantity")
+                
+                # If we have product_id, fetch complete details
+                if product_id:
+                    product_details = await self.get_product_details(product_id)
+                    
+                    if product_details:
+                        # Create detailed confirmation message
+                        message = "📦 **Stock Updated Successfully!**\n\n"
+                        message += "**Product Details:**\n"
+                        message += f"• **Name:** {product_details.get('name', 'Unknown')}\n"
+                        message += f"• **ID:** {product_id}\n"
+                        message += f"• **Price:** ${product_details.get('price', '0.00')}\n"
+                        message += f"• **Category:** {product_details.get('category', 'Unknown')}\n"
+                        if product_details.get('description'):
+                            message += f"• **Description:** {product_details.get('description')}\n"
+                        message += f"• **New Stock Level:** {quantity_param} units\n\n"
+                        message += "✅ Your inventory has been updated!"
                     else:
-                        # Parse JSON response if available
-                        json_start = response_text.find("{")
-                        if json_start >= 0:
-                            json_part = response_text[json_start:]
-                            stock_data = json.loads(json_part)
+                        # Fallback if product details can't be fetched
+                        message = "📦 **Stock Updated Successfully!**\n\n"
+                        message += f"Stock updated for {product_id}: {quantity_param} units"
+                else:
+                    # Fallback to basic response
+                    message = "📦 **Stock Updated Successfully!**\n\nYour inventory has been updated!"
 
-                            product_id = stock_data.get("product_id", "Unknown")
-                            new_quantity = stock_data.get("quantity", "Unknown")
-
-                            # Map product ID to name for better display
-                            product_name = "Unknown Product"
-                            if product_id == "prod_000004":
-                                product_name = "Laptop Pro"
-                            elif product_id == "prod_000010":
-                                product_name = "microphone Egile"
-                            elif product_id == "prod_000009":
-                                product_name = "Gaming Headset Pro"
-                            elif product_id == "prod_000007":
-                                product_name = "Test iPhone"
-                            elif product_id == "prod_000005":
-                                product_name = "Wireless Mouse"
-                            elif product_id == "prod_000006":
-                                product_name = "USB Drive"
-                            elif product_id == "prod_000008":
-                                product_name = "Test Laptop"
-
-                            message = f"📦 **Stock Updated Successfully!**\n\n"
-                            message += f"**Product:** {product_name} ({product_id})\n"
-                            message += f"**New Stock Level:** {new_quantity} units\n\n"
-                            message += "✅ Your inventory has been updated!"
-                        else:
-                            message = (
-                                f"📦 **Stock Updated Successfully!**\n\n{response_text}"
-                            )
-
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    # Get parameters from intent to show what was updated
-                    params = intent_analysis.get("parameters", {})
-                    product_id = params.get("product_id", "Unknown")
-                    quantity = params.get("quantity", "Unknown")
-
-                    # Map product ID to name
-                    product_name = "Unknown Product"
-                    if product_id == "prod_000004":
-                        product_name = "Laptop Pro"
-                    elif product_id == "prod_000010":
-                        product_name = "microphone Egile"
-                    elif product_id == "prod_000009":
-                        product_name = "Gaming Headset Pro"
-                    elif product_id == "prod_000007":
-                        product_name = "Test iPhone"
-                    elif product_id == "prod_000005":
-                        product_name = "Wireless Mouse"
-                    elif product_id == "prod_000006":
-                        product_name = "USB Drive"
-                    elif product_id == "prod_000008":
-                        product_name = "Test Laptop"
-
-                    message = f"📦 **Stock Updated Successfully!**\n\n"
-                    message += f"**Product:** {product_name}\n"
-                    message += f"**New Stock Level:** {quantity} units\n\n"
-                    message += "✅ Your inventory has been updated!"
-            else:
+            except Exception as e:
+                logger.warning(f"Error generating enhanced stock update response: {e}")
+                # Simple fallback
                 message = "📦 **Stock Updated Successfully!**\n\nYour inventory has been updated!"
         else:
             message = f"✅ Operation completed successfully! Action: {action}"
@@ -2373,3 +2331,25 @@ To create an order, I need three pieces of information:
         except Exception as e:
             logger.warning(f"Failed to post-process product list: {e}")
             return result  # Return original result if processing fails
+
+    async def get_product_details(self, product_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch complete product details for the given product ID
+        """
+        try:
+            if self.ecommerce_agent:
+                result = await self.ecommerce_agent.get_product(identifier=product_id, search_by="id")
+                if result.success and hasattr(result, 'data') and result.data:
+                    # Parse the JSON data properly
+                    if isinstance(result.data, list) and len(result.data) > 0:
+                        data_item = result.data[0]
+                        if isinstance(data_item, dict) and 'text' in data_item:
+                            import json
+                            return json.loads(data_item['text'])
+                        elif isinstance(data_item, dict):
+                            return data_item
+                    elif isinstance(result.data, dict):
+                        return result.data
+        except Exception as e:
+            logger.warning(f"Failed to fetch product details for {product_id}: {e}")
+        return None
