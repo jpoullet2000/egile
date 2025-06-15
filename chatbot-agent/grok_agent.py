@@ -1529,7 +1529,9 @@ Want to create another product? Just say "create a new product" or "help me crea
         """Generate a conversational response using Grok 3"""
         if not self.grok_api_key:
             # Fallback to simple response formatting
-            return await self.fallback_response_generation(intent_analysis, action_result)
+            return await self.fallback_response_generation(
+                intent_analysis, action_result
+            )
 
         try:
             import httpx
@@ -1599,7 +1601,9 @@ Guidelines:
 
         except Exception as e:
             logger.warning(f"Failed to generate response with Grok: {e}")
-            return await self.fallback_response_generation(intent_analysis, action_result)
+            return await self.fallback_response_generation(
+                intent_analysis, action_result
+            )
 
     async def fallback_response_generation(
         self,
@@ -2018,27 +2022,33 @@ Guidelines:
                 params = intent_analysis.get("parameters", {})
                 product_id = params.get("product_id")
                 quantity_param = params.get("quantity")
-                
+
                 # If we have product_id, fetch complete details
                 if product_id:
                     product_details = await self.get_product_details(product_id)
-                    
+
                     if product_details:
                         # Create detailed confirmation message
                         message = "📦 **Stock Updated Successfully!**\n\n"
                         message += "**Product Details:**\n"
-                        message += f"• **Name:** {product_details.get('name', 'Unknown')}\n"
+                        message += (
+                            f"• **Name:** {product_details.get('name', 'Unknown')}\n"
+                        )
                         message += f"• **ID:** {product_id}\n"
-                        message += f"• **Price:** ${product_details.get('price', '0.00')}\n"
+                        message += (
+                            f"• **Price:** ${product_details.get('price', '0.00')}\n"
+                        )
                         message += f"• **Category:** {product_details.get('category', 'Unknown')}\n"
-                        if product_details.get('description'):
+                        if product_details.get("description"):
                             message += f"• **Description:** {product_details.get('description')}\n"
                         message += f"• **New Stock Level:** {quantity_param} units\n\n"
                         message += "✅ Your inventory has been updated!"
                     else:
                         # Fallback if product details can't be fetched
                         message = "📦 **Stock Updated Successfully!**\n\n"
-                        message += f"Stock updated for {product_id}: {quantity_param} units"
+                        message += (
+                            f"Stock updated for {product_id}: {quantity_param} units"
+                        )
                 else:
                     # Fallback to basic response
                     message = "📦 **Stock Updated Successfully!**\n\nYour inventory has been updated!"
@@ -2338,14 +2348,17 @@ To create an order, I need three pieces of information:
         """
         try:
             if self.ecommerce_agent:
-                result = await self.ecommerce_agent.get_product(identifier=product_id, search_by="id")
-                if result.success and hasattr(result, 'data') and result.data:
+                result = await self.ecommerce_agent.get_product(
+                    identifier=product_id, search_by="id"
+                )
+                if result.success and hasattr(result, "data") and result.data:
                     # Parse the JSON data properly
                     if isinstance(result.data, list) and len(result.data) > 0:
                         data_item = result.data[0]
-                        if isinstance(data_item, dict) and 'text' in data_item:
+                        if isinstance(data_item, dict) and "text" in data_item:
                             import json
-                            return json.loads(data_item['text'])
+
+                            return json.loads(data_item["text"])
                         elif isinstance(data_item, dict):
                             return data_item
                     elif isinstance(result.data, dict):

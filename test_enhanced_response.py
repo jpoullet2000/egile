@@ -25,20 +25,21 @@ async def test_enhanced_stock_response():
 
         test_cases = [
             'update stock of "Test Laptop" by 5',
-            'update stock laptop pro by 3',
+            "update stock laptop pro by 3",
         ]
 
         for command in test_cases:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Testing: {command}")
-            print(f"{'='*60}")
-            
+            print(f"{'=' * 60}")
+
             response = await agent.process_message(command)
             print(f"Response:\n{response.get('message', 'No message')}")
 
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         await agent.stop()
