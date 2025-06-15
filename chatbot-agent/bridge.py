@@ -153,8 +153,8 @@ async def main():
         await bridge.start_agent()
 
         # Start WebSocket server
-        logger.info("Starting WebSocket server on localhost:8767")
-        server = await websockets.serve(bridge.handle_client, "localhost", 8767)
+        logger.info("Starting WebSocket server on localhost:8768")
+        server = await websockets.serve(bridge.handle_client, "localhost", 8768)
 
         logger.info(
             "Grok chatbot bridge is running! Open chatbot-agent/index.html in your browser."

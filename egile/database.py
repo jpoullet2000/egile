@@ -37,6 +37,7 @@ class Product:
 
 
 @dataclass
+@dataclass
 class Customer:
     id: str
     email: str
@@ -299,7 +300,28 @@ class EcommerceDatabase:
         try:
             cursor.execute("SELECT * FROM products ORDER BY created_at DESC")
             rows = cursor.fetchall()
-            return [Product(*row) for row in rows]
+
+            # Get column names to create proper mapping
+            columns = [description[0] for description in cursor.description]
+
+            products = []
+            for row in rows:
+                row_dict = dict(zip(columns, row))
+                product = Product(
+                    id=row_dict["id"],
+                    name=row_dict["name"],
+                    description=row_dict["description"],
+                    price=row_dict["price"],
+                    currency=row_dict["currency"],
+                    sku=row_dict["sku"],
+                    category=row_dict["category"],
+                    stock_quantity=row_dict["stock_quantity"],
+                    is_active=bool(row_dict["is_active"]),
+                    created_at=row_dict["created_at"],
+                    updated_at=row_dict["updated_at"],
+                )
+                products.append(product)
+            return products
         finally:
             conn.close()
 
@@ -428,12 +450,27 @@ class EcommerceDatabase:
         try:
             cursor.execute("SELECT * FROM customers ORDER BY created_at DESC")
             rows = cursor.fetchall()
+
+            # Get column names to create proper mapping
+            columns = [description[0] for description in cursor.description]
+
             customers = []
             for row in rows:
-                address = json.loads(row[5]) if row[5] else None
-                customers.append(
-                    Customer(row[0], row[1], row[2], row[3], row[4], address, row[6])
+                row_dict = dict(zip(columns, row))
+                address = (
+                    json.loads(row_dict["address"]) if row_dict["address"] else None
                 )
+
+                customer = Customer(
+                    id=row_dict["id"],
+                    email=row_dict["email"],
+                    first_name=row_dict["first_name"],
+                    last_name=row_dict["last_name"],
+                    phone=row_dict["phone"],
+                    address=address,
+                    created_at=row_dict["created_at"],
+                )
+                customers.append(customer)
             return customers
         finally:
             conn.close()

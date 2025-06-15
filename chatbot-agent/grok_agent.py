@@ -96,10 +96,15 @@ class GrokEcommerceAgent:
         try:
             import httpx
 
-            system_prompt = """You are an AI assistant for an e-commerce system. Analyze the user's message and determine:
-1. What action they want to perform (if any)
-2. Extract any parameters needed
-3. Determine if this requires executing an e-commerce operation
+            system_prompt = """You are an AI assistant for an e-commerce system. Analyze the user's message and determine what they want to do. Be flexible with natural language - understand common ways people ask about things.
+
+For example:
+- "what are my products?" = list_products
+- "show me all products" = list_products  
+- "what do I have in stock?" = list_products
+- "who are my customers?" = list_customers
+- "show me orders" = list_orders
+- "what's running low?" = get_low_stock_products
 
 Available operations:
 - list_products: Show all products
@@ -114,6 +119,8 @@ Available operations:
 - get_order: Get order details (needs: order_id)
 - get_low_stock_products: Show low stock items (optional: threshold)
 - update_stock: Update product stock (needs: product_id, quantity)
+
+IMPORTANT: Be generous in interpreting user intent. If someone asks about products in any way, they probably want to see the product list.
 
 Respond with JSON format:
 {
@@ -136,7 +143,7 @@ Respond with JSON format:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": message},
                         ],
-                        "model": "grok-beta",
+                        "model": "grok-3",
                         "stream": False,
                         "temperature": 0.1,
                     },
@@ -165,8 +172,27 @@ Respond with JSON format:
         """Fallback intent analysis using simple pattern matching"""
         message_lower = message.lower().strip()
 
-        # Product operations
-        if "list products" in message_lower or "show products" in message_lower:
+        # Product operations - more flexible patterns
+        product_list_patterns = [
+            "what are my products",
+            "show me products",
+            "list products",
+            "show products",
+            "what products do",
+            "products available",
+            "show all products",
+            "list all products",
+            "what's in stock",
+            "what do I have",
+            "my inventory",
+            "show inventory",
+            "what items",
+            "what do we have",
+            "product list",
+            "all products",
+        ]
+
+        if any(pattern in message_lower for pattern in product_list_patterns):
             return {
                 "intent": "List all products",
                 "action": "list_products",
@@ -175,32 +201,19 @@ Respond with JSON format:
                 "confidence": 0.9,
             }
 
-        if "create product" in message_lower:
-            return {
-                "intent": "Create a new product",
-                "action": "create_product",
-                "parameters": self.extract_product_params(message),
-                "requires_action": True,
-                "confidence": 0.8,
-            }
+        # Customer operations - flexible patterns
+        customer_list_patterns = [
+            "show customers",
+            "list customers",
+            "who are my customers",
+            "customer list",
+            "show me customers",
+            "all customers",
+            "customer base",
+            "my clients",
+        ]
 
-        if "search" in message_lower and "product" in message_lower:
-            query = (
-                message_lower.replace("search", "")
-                .replace("product", "")
-                .replace("for", "")
-                .strip()
-            )
-            return {
-                "intent": "Search for products",
-                "action": "search_products",
-                "parameters": {"query": query},
-                "requires_action": True,
-                "confidence": 0.8,
-            }
-
-        # Customer operations
-        if "list customers" in message_lower or "show customers" in message_lower:
+        if any(pattern in message_lower for pattern in customer_list_patterns):
             return {
                 "intent": "List all customers",
                 "action": "list_customers",
@@ -210,7 +223,18 @@ Respond with JSON format:
             }
 
         # Order operations
-        if "list orders" in message_lower or "show orders" in message_lower:
+        order_list_patterns = [
+            "show orders",
+            "list orders",
+            "order history",
+            "recent orders",
+            "what orders",
+            "show me orders",
+            "all orders",
+            "order list",
+        ]
+
+        if any(pattern in message_lower for pattern in order_list_patterns):
             return {
                 "intent": "List all orders",
                 "action": "list_orders",
@@ -219,12 +243,59 @@ Respond with JSON format:
                 "confidence": 0.9,
             }
 
-        # Stock operations
-        if "low stock" in message_lower or "stock low" in message_lower:
+        # Low stock patterns
+        low_stock_patterns = [
+            "low stock",
+            "running low",
+            "stock levels",
+            "inventory levels",
+            "what's low",
+            "low inventory",
+            "need to reorder",
+            "stock shortage",
+        ]
+
+        if any(pattern in message_lower for pattern in low_stock_patterns):
             return {
                 "intent": "Check low stock items",
                 "action": "get_low_stock_products",
-                "parameters": {"threshold": 10},
+                "parameters": {},
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        # Create product patterns
+        create_product_patterns = [
+            "create product",
+            "add product",
+            "new product",
+            "add new product",
+        ]
+        if any(pattern in message_lower for pattern in create_product_patterns):
+            return {
+                "intent": "Create a new product",
+                "action": "create_product",
+                "parameters": self.extract_product_params(message),
+                "requires_action": True,
+                "confidence": 0.8,
+            }
+
+        # Search products
+        if "search" in message_lower and any(
+            word in message_lower for word in ["product", "item", "for"]
+        ):
+            # Extract search query
+            query_parts = (
+                message_lower.replace("search", "")
+                .replace("product", "")
+                .replace("for", "")
+                .replace("item", "")
+                .strip()
+            )
+            return {
+                "intent": "Search for products",
+                "action": "search_products",
+                "parameters": {"query": query_parts},
                 "requires_action": True,
                 "confidence": 0.8,
             }
@@ -297,7 +368,37 @@ Respond with JSON format:
         else:
             result = await method()
 
-        return {"action": action, "result": result, "success": True}
+        # Extract data from AgentResponse for JSON serialization
+        if hasattr(result, "data"):
+            # The MCP agent returns data as [{'type': 'text', 'text': 'JSON_STRING'}]
+            # We need to extract and parse the JSON string
+            processed_data = result.data
+            if (
+                isinstance(processed_data, list)
+                and len(processed_data) > 0
+                and isinstance(processed_data[0], dict)
+                and processed_data[0].get("type") == "text"
+            ):
+                try:
+                    # Parse the JSON string to get actual objects
+                    json_text = processed_data[0]["text"]
+                    processed_data = json.loads(json_text)
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Failed to parse JSON from MCP response: {e}")
+                    # Keep original data if parsing fails
+                    processed_data = result.data
+
+            # Create a clean, JSON-serializable response
+            return {
+                "action": action,
+                "success": result.success,
+                "data": processed_data,
+                "message": getattr(result, "message", ""),
+                "error": getattr(result, "error", "") if not result.success else "",
+            }
+        else:
+            # Handle case where result is raw data
+            return {"action": action, "result": result, "success": True}
 
     async def generate_response_with_grok(
         self,
@@ -394,36 +495,86 @@ Guidelines:
             }
 
         action = action_result.get("action")
-        result = action_result.get("result")
+
+        # Handle the new structure where we have direct data access
+        if "data" in action_result:
+            data = action_result.get("data", [])
+            success = action_result.get("success", True)
+            error_msg = action_result.get("error", "")
+        else:
+            # Fallback for old structure
+            result = action_result.get("result")
+            if hasattr(result, "data"):
+                data = result.data if result.success else []
+                success = result.success
+                error_msg = result.error if hasattr(result, "error") else ""
+            else:
+                data = result
+                success = True
+                error_msg = ""
+
+        if not success:
+            return {
+                "type": "chat_response",
+                "message": f"❌ Error executing action: {error_msg}",
+                "intent": intent_analysis,
+            }
 
         # Format response based on action type
         if action == "list_products":
-            if result and len(result) > 0:
-                message = f"📦 I found {len(result)} product(s) in your catalog:\n\n"
-                for product in result[:5]:  # Show first 5
-                    message += f"• **{product.get('name')}** ({product.get('sku')})\n"
-                    message += f"  💰 ${product.get('price')} | 📦 Stock: {product.get('stock_quantity')}\n\n"
-                if len(result) > 5:
-                    message += f"... and {len(result) - 5} more products."
+            if data and len(data) > 0:
+                message = f"📦 I found {len(data)} product(s) in your catalog:\n\n"
+                for product in data[:5]:  # Show first 5
+                    # Debug: Check what type of object we have
+                    logger.info(f"Product object type: {type(product)}")
+                    logger.info(f"Product object: {product}")
+
+                    # Handle dict objects (should be parsed JSON now)
+                    if isinstance(product, dict):
+                        message += (
+                            f"• **{product.get('name')}** ({product.get('sku')})\n"
+                        )
+                        message += f"  💰 ${product.get('price')} | 📦 Stock: {product.get('stock_quantity')}\n\n"
+                    elif hasattr(product, "name"):
+                        # Dataclass object (backup)
+                        message += f"• **{product.name}** ({product.sku})\n"
+                        message += f"  💰 ${product.price} | 📦 Stock: {product.stock_quantity}\n\n"
+                if len(data) > 5:
+                    message += f"... and {len(data) - 5} more products."
             else:
                 message = "📦 No products found in your catalog. Would you like to create some?"
 
         elif action == "list_customers":
-            if result and len(result) > 0:
-                message = f"👥 I found {len(result)} customer(s):\n\n"
-                for customer in result[:5]:
-                    message += f"• **{customer.get('first_name')} {customer.get('last_name')}**\n"
-                    message += f"  📧 {customer.get('email')}\n\n"
-                if len(result) > 5:
-                    message += f"... and {len(result) - 5} more customers."
+            if data and len(data) > 0:
+                message = f"👥 I found {len(data)} customer(s):\n\n"
+                for customer in data[:5]:
+                    # Debug: Check what type of object we have
+                    logger.info(f"Customer object type: {type(customer)}")
+                    logger.info(f"Customer object: {customer}")
+
+                    # Handle dict objects (should be parsed JSON now)
+                    if isinstance(customer, dict):
+                        message += f"• **{customer.get('first_name')} {customer.get('last_name')}**\n"
+                        message += f"  📧 {customer.get('email')}\n\n"
+                    elif hasattr(customer, "first_name"):
+                        # Dataclass object (backup)
+                        message += f"• **{customer.first_name} {customer.last_name}**\n"
+                        message += f"  📧 {customer.email}\n\n"
+                if len(data) > 5:
+                    message += f"... and {len(data) - 5} more customers."
             else:
                 message = "👥 No customers found. Ready to add your first customer?"
 
         elif action == "get_low_stock_products":
-            if result and len(result) > 0:
-                message = f"⚠️ {len(result)} product(s) are running low on stock:\n\n"
-                for product in result:
-                    message += f"• **{product.get('name')}** - Only {product.get('stock_quantity')} left!\n"
+            if data and len(data) > 0:
+                message = f"⚠️ {len(data)} product(s) are running low on stock:\n\n"
+                for product in data:
+                    # Handle dict objects (should be parsed JSON now)
+                    if isinstance(product, dict):
+                        message += f"• **{product.get('name')}** - Only {product.get('stock_quantity')} left!\n"
+                    elif hasattr(product, "name"):
+                        # Dataclass object (backup)
+                        message += f"• **{product.name}** - Only {product.stock_quantity} left!\n"
             else:
                 message = "🎉 Great news! All products are well-stocked."
 

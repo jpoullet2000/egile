@@ -12,6 +12,7 @@ import json
 import logging
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 try:
     import mcp.types as types
@@ -38,8 +39,11 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ecommerce-mcp-server")
 
-# Initialize database
-db = EcommerceDatabase()
+# Initialize database with absolute path to root directory
+# Get the project root directory (two levels up from this file)
+project_root = Path(__file__).parent.parent
+db_path = project_root / "ecommerce.db"
+db = EcommerceDatabase(str(db_path))
 
 # Initialize MCP server
 server = Server("ecommerce-mcp-server")

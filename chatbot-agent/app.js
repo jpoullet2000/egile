@@ -15,7 +15,7 @@ class GrokChatbot {
     connectToServer() {
         try {
             // Connect to the WebSocket bridge (different port for Grok agent)
-            this.ws = new WebSocket('ws://localhost:8767');
+            this.ws = new WebSocket('ws://localhost:8768');
             
             this.ws.onopen = () => {
                 this.isConnected = true;

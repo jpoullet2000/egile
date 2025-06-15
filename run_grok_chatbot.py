@@ -169,7 +169,7 @@ def start_grok_chatbot():
         print("• 'Which items are running low?'")
         print("• 'Help me process a new order'")
 
-        print("\n📍 WebSocket bridge: ws://localhost:8767")
+        print("\n📍 WebSocket bridge: ws://localhost:8768")
         print("📍 Web interface: http://localhost:8081")
         print("🛑 To stop the chatbot: Press Ctrl+C in this terminal")
 
