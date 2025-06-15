@@ -141,6 +141,9 @@ For example:
 - "what are my products?" = list_products
 - "show me all products" = list_products  
 - "what do I have in stock?" = list_products
+- "most expensive products" = list_products with sort_by: "price_desc"
+- "cheapest products" = list_products with sort_by: "price_asc"
+- "products by price" = list_products with sort_by: "price_desc"
 - "who are my customers?" = list_customers
 - "show me orders" = list_orders
 - "what's running low?" = get_low_stock_products
@@ -148,7 +151,7 @@ For example:
 - "I want to add a new product" = create_product or help_create_product
 
 Available operations:
-- list_products: Show all products
+- list_products: Show all products (supports parameters: sort_by: "price_desc"|"price_asc"|"name"|"stock", limit: number)
 - create_product: Create a new product (needs: name, description, price, sku, category, stock_quantity)
 - help_create_product: Provide guidance on creating products (when user asks for help but provides no details)
 - get_product: Get product details (needs: product_id or sku)
@@ -164,6 +167,10 @@ Available operations:
 
 IMPORTANT: 
 - Be generous in interpreting user intent
+- For product queries with sorting (expensive, cheap, etc.), use list_products with appropriate sort_by parameter
+- If someone asks about "most expensive" or "highest priced", use sort_by: "price_desc"
+- If someone asks about "cheapest" or "lowest priced", use sort_by: "price_asc"
+- You can add a limit parameter for "top 5" or similar requests
 - If someone asks about creating/adding products but doesn't provide all details, use help_create_product
 - If they provide partial details, extract what you can and set action to create_product
 - For product creation, try to extract: name, description, price, sku, category, stock_quantity
@@ -217,6 +224,74 @@ Respond with JSON format:
     def fallback_intent_analysis(self, message: str) -> Dict[str, Any]:
         """Fallback intent analysis using simple pattern matching"""
         message_lower = message.lower().strip()
+
+        # Expensive/cheap product patterns - check these first
+        expensive_patterns = [
+            "most expensive",
+            "highest priced",
+            "priciest",
+            "costliest",
+            "expensive products",
+            "highest price",
+            "most costly",
+        ]
+
+        cheap_patterns = [
+            "cheapest",
+            "lowest priced",
+            "least expensive",
+            "cheap products",
+            "lowest price",
+            "most affordable",
+        ]
+
+        if any(pattern in message_lower for pattern in expensive_patterns):
+            # Extract limit if mentioned (like "top 5 most expensive")
+            import re
+
+            limit_match = re.search(r"top (\d+)|first (\d+)|(\d+) most", message_lower)
+            limit = None
+            if limit_match:
+                limit = int(
+                    limit_match.group(1) or limit_match.group(2) or limit_match.group(3)
+                )
+
+            params = {"sort_by": "price_desc"}
+            if limit:
+                params["limit"] = limit
+
+            return {
+                "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}most expensive products",
+                "action": "list_products",
+                "parameters": params,
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        if any(pattern in message_lower for pattern in cheap_patterns):
+            # Extract limit if mentioned
+            import re
+
+            limit_match = re.search(
+                r"top (\d+)|first (\d+)|(\d+) cheapest", message_lower
+            )
+            limit = None
+            if limit_match:
+                limit = int(
+                    limit_match.group(1) or limit_match.group(2) or limit_match.group(3)
+                )
+
+            params = {"sort_by": "price_asc"}
+            if limit:
+                params["limit"] = limit
+
+            return {
+                "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}cheapest products",
+                "action": "list_products",
+                "parameters": params,
+                "requires_action": True,
+                "confidence": 0.9,
+            }
 
         # Product operations - more flexible patterns
         product_list_patterns = [
@@ -752,11 +827,28 @@ Want to create another product? Just say "create a new product" or "help me crea
         method_name = action_mapping[action]
         method = getattr(self.ecommerce_agent, method_name)
 
+        # Handle special cases for actions that don't support certain parameters
+        if action == "list_products" and parameters:
+            # get_all_products doesn't accept parameters, but we might want to sort later
+            # Store sorting info for post-processing
+            sort_info = parameters.copy()
+            logger.info(f"Storing sort_info for list_products: {sort_info}")
+            parameters = {}  # Clear parameters for the actual method call
+        else:
+            sort_info = None
+
         # Execute the method
         if parameters:
             result = await method(**parameters)
         else:
             result = await method()
+
+        # Post-process the result if sorting was requested
+        if sort_info and action == "list_products":
+            logger.info(f"Post-processing list_products with sort_info: {sort_info}")
+            result = await self.post_process_product_list(result, sort_info)
+        else:
+            logger.info(f"No post-processing needed. sort_info: {sort_info}, action: {action}")
 
         # Extract data from AgentResponse for JSON serialization
         if hasattr(result, "data"):
@@ -1005,28 +1097,79 @@ Guidelines:
             "action_result": action_result,
         }
 
+    async def post_process_product_list(self, result, sort_info: Dict[str, Any]):
+        """Post-process product list to apply sorting and filtering"""
+        try:
+            logger.info(f"Post-processing with sort_info: {sort_info}")
+            
+            # Extract and parse the product data
+            if hasattr(result, "data"):
+                processed_data = result.data
+                logger.info(f"Original data type: {type(processed_data)}")
+                if (
+                    isinstance(processed_data, list)
+                    and len(processed_data) > 0
+                    and isinstance(processed_data[0], dict)
+                    and processed_data[0].get("type") == "text"
+                ):
+                    try:
+                        import json
 
-async def main():
-    """Test the Grok agent"""
-    agent = GrokEcommerceAgent()
-    await agent.start()
+                        json_text = processed_data[0]["text"]
+                        products = json.loads(json_text)
+                        logger.info(f"Parsed {len(products)} products from JSON")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.warning(f"Failed to parse JSON: {e}")
+                        return result  # Return original if parsing fails
+                else:
+                    products = processed_data
+                    logger.info(f"Using data directly, type: {type(products)}")
+            else:
+                logger.warning("Result has no data attribute")
+                return result
 
-    try:
-        # Test conversation
-        test_messages = [
-            "Hello! Can you show me all products?",
-            "What customers do we have?",
-            "Are there any products with low stock?",
-        ]
+            # Apply sorting if requested
+            sort_by = sort_info.get("sort_by")
+            if sort_by:
+                logger.info(f"Applying sort: {sort_by}")
+                if sort_by == "price_desc" or sort_by == "price":
+                    # Sort by price descending (most expensive first)
+                    products.sort(key=lambda x: float(x.get("price", 0)), reverse=True)
+                    logger.info(f"Sorted by price desc. First product: {products[0].get('name')} - ${products[0].get('price')}")
+                elif sort_by == "price_asc":
+                    # Sort by price ascending (cheapest first)
+                    products.sort(key=lambda x: float(x.get("price", 0)), reverse=False)
+                elif sort_by == "name":
+                    # Sort by name alphabetically
+                    products.sort(key=lambda x: x.get("name", "").lower())
+                elif sort_by == "stock":
+                    # Sort by stock quantity
+                    products.sort(
+                        key=lambda x: int(x.get("stock_quantity", 0)), reverse=True
+                    )
 
-        for message in test_messages:
-            print(f"\nUser: {message}")
-            response = await agent.process_message(message)
-            print(f"Assistant: {response.get('message', 'No response')}")
+            # Apply limit if requested
+            limit = sort_info.get("limit")
+            if limit and isinstance(limit, int):
+                products = products[:limit]
 
-    finally:
-        await agent.stop()
+            # Update the result with sorted data
+            if hasattr(result, "data"):
+                if (
+                    isinstance(result.data, list)
+                    and len(result.data) > 0
+                    and isinstance(result.data[0], dict)
+                    and result.data[0].get("type") == "text"
+                ):
+                    # Update the JSON string
+                    import json
 
+                    result.data[0]["text"] = json.dumps(products)
+                else:
+                    result.data = products
 
-if __name__ == "__main__":
-    asyncio.run(main())
+            return result
+
+        except Exception as e:
+            logger.warning(f"Failed to post-process product list: {e}")
+            return result  # Return original result if processing fails
