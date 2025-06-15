@@ -1174,6 +1174,52 @@ Guidelines:
             else:
                 message = "👥 No customers found. Ready to add your first customer?"
 
+        elif action == "get_customer":
+            if data and len(data) > 0:
+                # Handle single customer details
+                customer = data[0] if isinstance(data, list) else data
+                logger.info(f"Customer object type: {type(customer)}")
+                logger.info(f"Customer object: {customer}")
+
+                if isinstance(customer, dict):
+                    name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                    email = customer.get("email", "No email")
+                    phone = customer.get("phone", "No phone number")
+                    customer_id = customer.get("id", "Unknown")
+                    created_at = customer.get("created_at", "")
+
+                    message = f"👤 **Customer Details**\n\n"
+                    message += f"**Name:** {name}\n"
+                    message += f"**Email:** {email}\n"
+                    message += f"**Phone:** {phone}\n"
+                    message += f"**Customer ID:** {customer_id}\n"
+                    if created_at:
+                        message += f"**Member since:** {created_at[:10]}\n"
+
+                    # Add contact information
+                    message += f"\n📞 **Contact Information:**\n"
+                    if phone and phone != "No phone number":
+                        message += f"• Call: {phone}\n"
+                    if email and email != "No email":
+                        message += f"• Email: {email}\n"
+
+                elif hasattr(customer, "first_name"):
+                    # Dataclass object (backup)
+                    name = f"{customer.first_name} {customer.last_name}".strip()
+                    message = f"👤 **Customer Details**\n\n"
+                    message += f"**Name:** {name}\n"
+                    message += f"**Email:** {getattr(customer, 'email', 'No email')}\n"
+                    message += (
+                        f"**Phone:** {getattr(customer, 'phone', 'No phone number')}\n"
+                    )
+                    message += (
+                        f"**Customer ID:** {getattr(customer, 'id', 'Unknown')}\n"
+                    )
+                else:
+                    message = f"👤 Customer found: {customer}"
+            else:
+                message = "👤 Customer not found. Please check the email address or customer ID."
+
         elif action == "list_orders":
             if data and len(data) > 0:
                 message = f"📋 I found {len(data)} order(s):\n\n"
@@ -1214,6 +1260,114 @@ Guidelines:
             else:
                 message = "🎉 Great news! All products are well-stocked."
 
+        elif action == "search_products":
+            if data and len(data) > 0:
+                query = intent_analysis.get("parameters", {}).get("query", "")
+                message = f"🔍 **Search Results for '{query}'**\n\n"
+                message += f"Found {len(data)} product(s):\n\n"
+
+                for product in data[:10]:  # Limit to 10 results
+                    if isinstance(product, dict):
+                        name = product.get("name", "Unnamed Product")
+                        price = product.get("price", 0)
+                        stock = product.get("stock_quantity", 0)
+                        category = product.get("category", "Unknown")
+                        description = product.get("description", "")
+
+                        message += f"• **{name}**\n"
+                        message += f"  💰 ${price:.2f}\n"
+                        message += f"  📦 {stock} in stock\n"
+                        message += f"  🏷️ Category: {category}\n"
+                        if description:
+                            # Truncate long descriptions
+                            desc = (
+                                description[:100] + "..."
+                                if len(description) > 100
+                                else description
+                            )
+                            message += f"  📝 {desc}\n"
+                        message += "\n"
+                    else:
+                        message += f"• {product}\n"
+
+                if len(data) > 10:
+                    message += f"... and {len(data) - 10} more results\n"
+            else:
+                query = intent_analysis.get("parameters", {}).get("query", "")
+                message = f"🔍 No products found matching '{query}'. Try different search terms."
+        elif action == "get_product":
+            if data and len(data) > 0:
+                product = data[0] if isinstance(data, list) else data
+
+                if isinstance(product, dict):
+                    name = product.get("name", "Unnamed Product")
+                    price = product.get("price", 0)
+                    stock = product.get("stock_quantity", 0)
+                    category = product.get("category", "Unknown")
+                    description = product.get("description", "")
+                    sku = product.get("sku", "")
+                    product_id = product.get("id", "Unknown")
+
+                    message = f"📦 **Product Details**\n\n"
+                    message += f"**Name:** {name}\n"
+                    message += f"**Price:** ${price:.2f}\n"
+                    message += f"**Stock:** {stock} units available\n"
+                    message += f"**Category:** {category}\n"
+                    if sku:
+                        message += f"**SKU:** {sku}\n"
+                    message += f"**Product ID:** {product_id}\n"
+                    if description:
+                        message += f"**Description:** {description}\n"
+
+                    # Add availability status
+                    if stock > 0:
+                        message += f"\n✅ **In Stock** - {stock} units available"
+                    else:
+                        message += f"\n❌ **Out of Stock**"
+                else:
+                    message = f"📦 Product details: {product}"
+            else:
+                identifier = intent_analysis.get("parameters", {}).get("identifier", "")
+                message = f"📦 Product not found. Please check the product ID or SKU: '{identifier}'"
+        elif action == "get_order":
+            if data and len(data) > 0:
+                order = data[0] if isinstance(data, list) else data
+
+                if isinstance(order, dict):
+                    order_id = order.get("id", "Unknown")
+                    status = order.get("status", "Unknown")
+                    total = order.get("total_amount", 0)
+                    quantity = order.get("quantity", 0)
+                    created_at = order.get("created_at", "")
+
+                    customer = order.get("customer", {})
+                    product = order.get("product", {})
+
+                    customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                    product_name = product.get("name", "Unknown Product")
+
+                    message = "📋 **Order Details**\n\n"
+                    message += f"**Order ID:** {order_id}\n"
+                    message += f"**Customer:** {customer_name}\n"
+                    message += f"**Product:** {product_name}\n"
+                    message += f"**Quantity:** {quantity}\n"
+                    message += f"**Total Amount:** ${total:.2f}\n"
+                    message += f"**Status:** {status}\n"
+                    if created_at:
+                        message += f"**Order Date:** {created_at[:10]}\n"
+
+                    # Add status indicator
+                    if status.lower() == "completed":
+                        message += "\n✅ **Order Completed**"
+                    elif status.lower() == "pending":
+                        message += "\n🕐 **Order Pending**"
+                    elif status.lower() == "cancelled":
+                        message += "\n❌ **Order Cancelled**"
+                else:
+                    message = f"📋 Order details: {order}"
+            else:
+                order_id = intent_analysis.get("parameters", {}).get("order_id", "")
+                message = f"📋 Order not found. Please check the order ID: '{order_id}'"
         else:
             message = f"✅ Operation completed successfully! Action: {action}"
 
