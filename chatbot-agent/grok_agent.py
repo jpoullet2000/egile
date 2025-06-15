@@ -76,6 +76,7 @@ class GrokEcommerceAgent:
                     "request_product_details",
                     "help_find_customer",
                     "help_choose_customer_contact",
+                    "help_create_order",
                 ]
                 if action in interactive_actions:
                     # Add assistant response to conversation history
@@ -266,17 +267,53 @@ Respond with JSON format:
                     limit_match.group(1) or limit_match.group(2) or limit_match.group(3)
                 )
 
-            params = {"sort_by": "price_desc"}
-            if limit:
-                params["limit"] = limit
+            # Check if they're asking for a specific product type (e.g., "most expensive laptop")
+            search_terms = []
+            common_product_types = [
+                "laptop",
+                "phone",
+                "computer",
+                "mouse",
+                "keyboard",
+                "monitor",
+                "tablet",
+                "headphone",
+                "speaker",
+                "drive",
+                "camera",
+                "watch",
+                "cable",
+                "charger",
+                "battery",
+            ]
+            for product_type in common_product_types:
+                if product_type in message_lower:
+                    search_terms.append(product_type)
 
-            return {
-                "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}most expensive products",
-                "action": "list_products",
-                "parameters": params,
-                "requires_action": True,
-                "confidence": 0.9,
-            }
+            if search_terms:
+                # Use search_products with sorting
+                params = {"query": " ".join(search_terms), "sort_by": "price_desc"}
+                if limit:
+                    params["limit"] = limit
+                return {
+                    "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}most expensive {' '.join(search_terms)}",
+                    "action": "search_products",
+                    "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+            else:
+                # General expensive products
+                params = {"sort_by": "price_desc"}
+                if limit:
+                    params["limit"] = limit
+                return {
+                    "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}most expensive products",
+                    "action": "list_products",
+                    "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
 
         if any(pattern in message_lower for pattern in cheap_patterns):
             # Extract limit if mentioned
@@ -291,17 +328,54 @@ Respond with JSON format:
                     limit_match.group(1) or limit_match.group(2) or limit_match.group(3)
                 )
 
-            params = {"sort_by": "price_asc"}
-            if limit:
-                params["limit"] = limit
+            # Check if they're asking for a specific product type (e.g., "cheapest laptop")
+            search_terms = []
+            common_product_types = [
+                "laptop",
+                "phone",
+                "computer",
+                "mouse",
+                "keyboard",
+                "monitor",
+                "tablet",
+                "headphone",
+                "speaker",
+                "drive",
+                "camera",
+                "watch",
+                "cable",
+                "charger",
+                "battery",
+            ]
+            for product_type in common_product_types:
+                if product_type in message_lower:
+                    search_terms.append(product_type)
 
-            return {
-                "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}cheapest products",
-                "action": "list_products",
-                "parameters": params,
-                "requires_action": True,
-                "confidence": 0.9,
-            }
+            if search_terms:
+                # Use search_products with sorting
+                params = {"query": " ".join(search_terms), "sort_by": "price_asc"}
+                if limit:
+                    params["limit"] = limit
+                return {
+                    "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}cheapest {' '.join(search_terms)}",
+                    "action": "search_products",
+                    "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+            else:
+                # General cheapest products
+                params = {"sort_by": "price_asc"}
+                if limit:
+                    params["limit"] = limit
+
+                return {
+                    "intent": f"Show {'top ' + str(limit) + ' ' if limit else ''}cheapest products",
+                    "action": "list_products",
+                    "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
 
         # Product operations - more flexible patterns
         product_list_patterns = [
@@ -522,6 +596,59 @@ Respond with JSON format:
                     "intent": "Create a new product",
                     "action": "create_product",
                     "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.8,
+                }
+
+        # Order creation patterns
+        order_creation_patterns = [
+            "create order",
+            "new order",
+            "place order",
+            "how to create order",
+            "how to place order",
+            "make order",
+            "add order",
+            "process order",
+            "how to create a new order",
+            "help me create order",
+            "help with order",
+        ]
+
+        if any(pattern in message_lower for pattern in order_creation_patterns):
+            # Check if they provided order details (customer, product, quantity)
+            import re
+
+            # Look for patterns like "customer: john@example.com", "product: laptop", "quantity: 2"
+            customer_match = re.search(
+                r"customer[:\s]+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|[a-zA-Z0-9_-]+)",
+                message_lower,
+            )
+            product_match = re.search(r"product[:\s]+([a-zA-Z0-9_-]+)", message_lower)
+            quantity_match = re.search(r"quantity[:\s]+(\d+)", message_lower)
+
+            params = {}
+            if customer_match:
+                params["customer_id"] = customer_match.group(1)
+            if product_match:
+                params["product_id"] = product_match.group(1)
+            if quantity_match:
+                params["quantity"] = int(quantity_match.group(1))
+
+            if len(params) >= 3:  # All required parameters provided
+                return {
+                    "intent": "Create a new order",
+                    "action": "create_order",
+                    "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+            else:
+                # Not enough details provided, offer help
+                return {
+                    "intent": "Help with creating an order",
+                    "action": "help_create_order",
+                    "parameters": {},
                     "requires_action": True,
                     "confidence": 0.8,
                 }
@@ -913,6 +1040,7 @@ Want to create another product? Just say "create a new product" or "help me crea
             "help_choose_customer_contact": "help_choose_customer_contact",
             "list_orders": "get_all_orders",
             "create_order": "create_order",
+            "help_create_order": "help_create_order",
             "get_order": "get_order",
             "get_low_stock_products": "get_low_stock_products",
             "update_stock": "update_stock",
@@ -930,6 +1058,8 @@ Want to create another product? Just say "create a new product" or "help me crea
             return await self.help_find_customer(parameters)
         elif action == "help_choose_customer_contact":
             return await self.help_choose_customer_contact()
+        elif action == "help_create_order":
+            return await self.help_create_order()
 
         method_name = action_mapping[action]
         method = getattr(self.ecommerce_agent, method_name)
@@ -941,6 +1071,19 @@ Want to create another product? Just say "create a new product" or "help me crea
             sort_info = parameters.copy()
             logger.info(f"Storing sort_info for list_products: {sort_info}")
             parameters = {}  # Clear parameters for the actual method call
+        elif action == "search_products" and parameters:
+            # search_products may have sort_by parameters we need to handle after search
+            sort_info = {
+                k: v for k, v in parameters.items() if k in ["sort_by", "limit"]
+            }
+            if sort_info:
+                # Remove sort parameters from the actual method call
+                parameters = {
+                    k: v for k, v in parameters.items() if k not in ["sort_by", "limit"]
+                }
+                logger.info(f"Storing sort_info for search_products: {sort_info}")
+            else:
+                sort_info = None
         else:
             sort_info = None
 
@@ -953,8 +1096,8 @@ Want to create another product? Just say "create a new product" or "help me crea
             result = await method()
 
         # Post-process the result if sorting was requested
-        if sort_info and action == "list_products":
-            logger.info(f"Post-processing list_products with sort_info: {sort_info}")
+        if sort_info and action in ["list_products", "search_products"]:
+            logger.info(f"Post-processing {action} with sort_info: {sort_info}")
             result = await self.post_process_product_list(result, sort_info)
         else:
             logger.info(
@@ -1478,6 +1621,97 @@ Here are your customers. To get contact details for any of them, just ask:
             return {
                 "type": "error",
                 "message": f"❌ Error retrieving customers: {str(e)}",
+            }
+
+    async def help_create_order(self) -> Dict[str, Any]:
+        """Provide guidance on creating an order"""
+        try:
+            # Get customers and products to help user understand what's available
+            customers_result = await self.ecommerce_agent.get_all_customers()
+            products_result = await self.ecommerce_agent.get_all_products()
+
+            message = """📋 **How to Create a New Order**
+
+To create an order, I need three pieces of information:
+1. **Customer ID** (who is placing the order)
+2. **Product ID** (what they want to buy)  
+3. **Quantity** (how many items)
+
+"""
+
+            # Show available customers
+            if customers_result.success and customers_result.data:
+                customers = customers_result.data
+                if (
+                    isinstance(customers, list)
+                    and len(customers) > 0
+                    and isinstance(customers[0], dict)
+                    and customers[0].get("type") == "text"
+                ):
+                    import json
+
+                    customers = json.loads(customers[0]["text"])
+
+                if customers and len(customers) > 0:
+                    message += "👥 **Available Customers:**\n"
+                    for customer in customers[:5]:  # Show first 5
+                        if isinstance(customer, dict):
+                            name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                            email = customer.get("email", "")
+                            customer_id = customer.get("id", "")
+                            message += f"• **{name}** (ID: {customer_id}) - {email}\n"
+                    if len(customers) > 5:
+                        message += f"... and {len(customers) - 5} more customers\n"
+                    message += "\n"
+
+            # Show available products
+            if products_result.success and products_result.data:
+                products = products_result.data
+                if (
+                    isinstance(products, list)
+                    and len(products) > 0
+                    and isinstance(products[0], dict)
+                    and products[0].get("type") == "text"
+                ):
+                    import json
+
+                    products = json.loads(products[0]["text"])
+
+                if products and len(products) > 0:
+                    message += "📦 **Available Products:**\n"
+                    for product in products[:5]:  # Show first 5
+                        if isinstance(product, dict):
+                            name = product.get("name", "Unnamed Product")
+                            product_id = product.get("id", "")
+                            price = product.get("price", 0)
+                            stock = product.get("stock_quantity", 0)
+                            message += f"• **{name}** (ID: {product_id}) - ${price:.2f} ({stock} in stock)\n"
+                    if len(products) > 5:
+                        message += f"... and {len(products) - 5} more products\n"
+                    message += "\n"
+
+            message += """💡 **Example Order Creation:**
+"Create order for customer 1, product 2, quantity 3"
+
+🔧 **Alternative Commands:**
+• "place order customer: john@example.com product: laptop quantity: 2"
+• "new order for customer 5 with 1 of product 10"
+
+📝 **Need to check IDs?**
+• "show me customers" - to see all customer IDs
+• "show me products" - to see all product IDs"""
+
+            return {
+                "type": "chat_response",
+                "action": "help_create_order",
+                "success": True,
+                "message": message,
+            }
+
+        except Exception as e:
+            return {
+                "type": "error",
+                "message": f"❌ Error providing order creation help: {str(e)}",
             }
 
     async def post_process_product_list(self, result, sort_info: Dict[str, Any]):
