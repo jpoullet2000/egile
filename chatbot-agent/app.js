@@ -15,12 +15,12 @@ class GrokChatbot {
     connectToServer() {
         try {
             // Connect to the WebSocket bridge (different port for Grok agent)
-            this.ws = new WebSocket('ws://localhost:8766');
+            this.ws = new WebSocket('ws://localhost:8767');
             
             this.ws.onopen = () => {
                 this.isConnected = true;
                 this.updateConnectionStatus(true);
-                this.addMessage('system', '🤖 Connected to Grok AI! Ready to assist you.');
+                // Wait for server confirmation before showing connection message
                 
                 // Process any queued messages
                 while (this.messageQueue.length > 0) {
@@ -115,7 +115,11 @@ class GrokChatbot {
     handleServerResponse(response) {
         this.hideTypingIndicator();
 
-        if (response.type === 'chat_response') {
+        if (response.type === 'connection_confirmed') {
+            this.addMessage('system', '🤖 Connected to Grok AI! Ready to assist you.');
+        } else if (response.type === 'processing') {
+            this.showTypingIndicator();
+        } else if (response.type === 'chat_response') {
             this.addMessage('bot', response.message);
         } else if (response.type === 'error') {
             this.addMessage('system', `❌ Error: ${response.message}`);

@@ -178,15 +178,19 @@ class ChatbotBridge:
             if hasattr(agent_response, "success"):
                 if agent_response.success:
                     # Extract and parse the JSON data from the MCP response
-                    raw_data = agent_response.data  # This is [{'type': 'text', 'text': 'JSON string'}]
+                    raw_data = (
+                        agent_response.data
+                    )  # This is [{'type': 'text', 'text': 'JSON string'}]
                     if isinstance(raw_data, list) and len(raw_data) > 0:
-                        text_content = raw_data[0].get('text', '[]')
+                        text_content = raw_data[0].get("text", "[]")
                         try:
                             # Parse the JSON string to get the actual data
                             parsed_data = json.loads(text_content)
                             return parsed_data
                         except json.JSONDecodeError:
-                            logger.error(f"Failed to parse JSON from MCP response: {text_content[:100]}...")
+                            logger.error(
+                                f"Failed to parse JSON from MCP response: {text_content[:100]}..."
+                            )
                             return text_content
                     return raw_data
                 else:

@@ -9,6 +9,9 @@ import sys
 import webbrowser
 import time
 import os
+import threading
+import http.server
+import socketserver
 from pathlib import Path
 
 
@@ -47,6 +50,27 @@ def check_grok_api_key():
     else:
         print("✅ XAI API key found")
         return True
+
+
+def start_http_server(chatbot_dir, port=8080):
+    """Start HTTP server to serve the Grok chatbot interface"""
+
+    class ChatbotHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(chatbot_dir), **kwargs)
+
+    try:
+        with socketserver.TCPServer(("", port), ChatbotHTTPRequestHandler) as httpd:
+            print(f"✅ HTTP server started on http://localhost:{port}")
+            httpd.serve_forever()
+    except OSError as e:
+        if e.errno == 98:  # Address already in use
+            print(
+                f"⚠️  Port {port} is already in use. Please close other applications using this port."
+            )
+            return None
+        else:
+            raise
 
 
 def start_grok_chatbot():
@@ -101,17 +125,27 @@ def start_grok_chatbot():
 
         print("✅ Grok agent bridge started successfully")
 
+        # Start HTTP server in a separate thread
+        chatbot_dir = script_dir / "chatbot-agent"
+        http_server_thread = threading.Thread(
+            target=start_http_server, args=(chatbot_dir, 8081), daemon=True
+        )
+        http_server_thread.start()
+
+        # Give the HTTP server a moment to start
+        time.sleep(2)
+
         # Open the chatbot in browser
-        html_path = html_file.absolute().as_uri()
+        chatbot_url = "http://localhost:8081"
         print("\n🌐 Opening Grok chatbot in browser...")
-        print(f"   URL: {html_path}")
+        print(f"   URL: {chatbot_url}")
 
         try:
-            webbrowser.open(html_path)
+            webbrowser.open(chatbot_url)
             print("✅ Browser opened")
         except Exception as e:
             print(f"⚠️  Could not auto-open browser: {e}")
-            print(f"   Please manually open: {html_path}")
+            print(f"   Please manually open: {chatbot_url}")
 
         print("\n" + "=" * 55)
         print("🎉 Grok AI Chatbot is ready!")
@@ -135,7 +169,8 @@ def start_grok_chatbot():
         print("• 'Which items are running low?'")
         print("• 'Help me process a new order'")
 
-        print("\n📍 Server running on: ws://localhost:8766")
+        print("\n📍 WebSocket bridge: ws://localhost:8767")
+        print("📍 Web interface: http://localhost:8081")
         print("🛑 To stop the chatbot: Press Ctrl+C in this terminal")
 
         # Keep the script running and monitor the bridge process

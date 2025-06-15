@@ -48,20 +48,48 @@ class GrokChatbotBridge:
             await self.agent.stop()
             logger.info("Grok AI agent stopped")
 
-    async def handle_client(self, websocket, path):
+    async def handle_client(self, websocket):
         """Handle a new WebSocket client connection"""
         self.connected_clients.add(websocket)
         logger.info(f"Client connected. Total clients: {len(self.connected_clients)}")
 
         try:
+            # Send initial connection confirmation
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "connection_confirmed",
+                        "message": "Connected to Grok AI Agent successfully!",
+                    }
+                )
+            )
+
+            # Start ping task to keep connection alive
+            ping_task = asyncio.create_task(self.ping_client(websocket))
+
             async for message in websocket:
                 await self.process_message(websocket, message)
+
         except websockets.exceptions.ConnectionClosed:
             logger.info("Client disconnected")
         except Exception as e:
             logger.error(f"Error handling client: {e}")
         finally:
+            # Cancel ping task
+            if "ping_task" in locals():
+                ping_task.cancel()
             self.connected_clients.discard(websocket)
+
+    async def ping_client(self, websocket):
+        """Send periodic ping to keep connection alive"""
+        try:
+            while True:
+                await asyncio.sleep(30)  # Ping every 30 seconds
+                if websocket.closed:
+                    break
+                await websocket.ping()
+        except Exception as e:
+            logger.debug(f"Ping failed: {e}")
 
     async def process_message(self, websocket, message: str):
         """Process a message from the web client"""
@@ -85,12 +113,27 @@ class GrokChatbotBridge:
     async def handle_chat_message(self, websocket, user_message: str):
         """Handle a chat message using the Grok agent"""
         try:
-            # Process the message with the Grok agent
-            response = await self.agent.process_message(user_message)
+            # Send acknowledgment that message is being processed
+            await websocket.send(
+                json.dumps(
+                    {"type": "processing", "message": "Processing your request..."}
+                )
+            )
+
+            # Process the message with the Grok agent with timeout
+            response = await asyncio.wait_for(
+                self.agent.process_message(user_message),
+                timeout=60.0,  # 60 second timeout
+            )
 
             # Send the response back to the client
             await websocket.send(json.dumps(response))
 
+        except asyncio.TimeoutError:
+            logger.error("Message processing timed out")
+            await self.send_error(
+                websocket, "Request timed out. Please try a simpler query."
+            )
         except Exception as e:
             logger.error(f"Error handling chat message: {e}")
             await self.send_error(websocket, f"Agent error: {str(e)}")
@@ -110,8 +153,8 @@ async def main():
         await bridge.start_agent()
 
         # Start WebSocket server
-        logger.info("Starting WebSocket server on localhost:8766")
-        server = await websockets.serve(bridge.handle_client, "localhost", 8766)
+        logger.info("Starting WebSocket server on localhost:8767")
+        server = await websockets.serve(bridge.handle_client, "localhost", 8767)
 
         logger.info(
             "Grok chatbot bridge is running! Open chatbot-agent/index.html in your browser."
