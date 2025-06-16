@@ -139,7 +139,7 @@ class GrokEcommerceAgent:
         """Analyze user intent using Grok 3"""
         if not self.grok_api_key:
             # Fallback to simple pattern matching if no API key
-            return self.fallback_intent_analysis(message)
+            return await self.fallback_intent_analysis(message)
 
         try:
             import httpx
@@ -157,6 +157,8 @@ For example:
 - "contact customer john@example.com" = get_customer with identifier: "john@example.com", search_by: "email"
 - "customer details for john@example.com" = get_customer with identifier: "john@example.com", search_by: "email"
 - "who are my customers?" = list_customers
+- "best customer" = list_customers (will analyze orders to find top customers)
+- "top customers" = list_customers (will analyze spending patterns)
 - "show me orders" = list_orders
 - "what's running low?" = get_low_stock_products
 - "help me create a product" = create_product (if details provided) or help_create_product (if no details)
@@ -226,16 +228,16 @@ Respond with JSON format:
                         return json.loads(content)
                     except json.JSONDecodeError:
                         # If JSON parsing fails, extract intent manually
-                        return self.fallback_intent_analysis(message)
+                        return await self.fallback_intent_analysis(message)
                 else:
                     logger.warning(f"Grok API error: {response.status_code}")
-                    return self.fallback_intent_analysis(message)
+                    return await self.fallback_intent_analysis(message)
 
         except Exception as e:
             logger.warning(f"Failed to use Grok API: {e}")
-            return self.fallback_intent_analysis(message)
+            return await self.fallback_intent_analysis(message)
 
-    def fallback_intent_analysis(self, message: str) -> Dict[str, Any]:
+    async def fallback_intent_analysis(self, message: str) -> Dict[str, Any]:
         """Fallback intent analysis using simple pattern matching"""
         message_lower = message.lower().strip()
 
@@ -425,6 +427,27 @@ Respond with JSON format:
             return {
                 "intent": "List all customers",
                 "action": "list_customers",
+                "parameters": {},
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        # Best customer patterns
+        best_customer_patterns = [
+            "best customer",
+            "top customer",
+            "biggest customer",
+            "most valuable customer",
+            "highest spending customer",
+            "who is my best customer",
+            "who spends the most",
+            "top spending customer",
+        ]
+
+        if any(pattern in message_lower for pattern in best_customer_patterns):
+            return {
+                "intent": "Find best customers by spending",
+                "action": "analyze_best_customers",
                 "parameters": {},
                 "requires_action": True,
                 "confidence": 0.9,
@@ -674,21 +697,16 @@ Respond with JSON format:
                         customer_id = "cust_000001"  # Use first customer
 
                 if not product_id.startswith("prod_"):
-                    # Map common product terms to actual product IDs
-                    product_mapping = {
-                        "laptop": "prod_000004",  # Laptop Pro
-                        "laptops": "prod_000004",
-                        "microphone": "prod_000010",
-                        "microphones": "prod_000010",
-                        "headset": "prod_000009",
-                        "headsets": "prod_000009",
-                        "iphone": "prod_000007",
-                        "phone": "prod_000007",
-                        "phones": "prod_000007",
-                        "usb": "prod_000006",
-                        "drive": "prod_000006",
-                    }
-                    product_id = product_mapping.get(product_id.lower(), product_id)
+                    # Use dynamic product mapping instead of hardcoded mapping
+                    mapped_id = await self._get_dynamic_product_mapping(
+                        product_id.lower()
+                    )
+                    if mapped_id:
+                        product_id = mapped_id
+                    else:
+                        logger.warning(
+                            f"Could not map product '{product_id}' to any existing product"
+                        )
 
                 # Convert to proper format for create_order method
                 items = [{"product_id": product_id, "quantity": params["quantity"]}]
@@ -1128,53 +1146,6 @@ Want to create another product? Just say "create a new product" or "help me crea
             "message": "❌ Unknown step in product creation process.",
         }
 
-    def _smart_product_mapping(self, search_term: str) -> Optional[str]:
-        """
-        Smart product mapping that handles specific product names better.
-        Checks for exact matches first, then partial matches.
-        """
-        search_term = search_term.lower().strip()
-
-        # Exact matches first (most specific)
-        exact_mappings = {
-            "laptop pro": "prod_000004",
-            "test laptop": "prod_000008",
-            "microphone egile": "prod_000010",
-            "gaming headset": "prod_000009",
-            "usb drive": "prod_000006",
-        }
-
-        if search_term in exact_mappings:
-            return exact_mappings[search_term]
-
-        # Partial matches with priority order (check more specific first)
-        partial_mappings = [
-            # Test Laptop should be matched before general laptop
-            (["test laptop", "testing laptop"], "prod_000008"),
-            # Laptop Pro should be matched before general laptop
-            (["laptop pro", "pro laptop"], "prod_000004"),
-            # Microphone variants
-            (["microphone egile", "egile microphone"], "prod_000010"),
-            (["microphone", "microphones", "mic"], "prod_000010"),
-            # Headset variants
-            (["gaming headset", "headset gaming"], "prod_000009"),
-            (["headset", "headsets"], "prod_000009"),
-            # Phone variants
-            (["iphone", "phone", "phones"], "prod_000007"),
-            # USB variants
-            (["usb drive", "drive usb"], "prod_000006"),
-            (["usb", "drive"], "prod_000006"),
-            # General laptop (lowest priority to avoid conflicts)
-            (["laptop", "laptops"], "prod_000004"),
-        ]
-
-        for keywords, product_id in partial_mappings:
-            for keyword in keywords:
-                if keyword in search_term:
-                    return product_id
-
-        return None
-
     def _extract_product_name_from_stock_command(
         self, message_lower: str
     ) -> Optional[str]:
@@ -1240,12 +1211,91 @@ Want to create another product? Just say "create a new product" or "help me crea
 
         return None
 
+    async def _extract_product_from_message(self, message: str) -> Optional[str]:
+        """
+        Fallback method to extract product names from user messages
+        when the LLM fails to parse them properly.
+        Uses dynamic database search instead of hardcoded mapping.
+        """
+        try:
+            message_lower = message.lower()
+
+            # Extract potential product terms from the message
+            # Look for patterns like "2 headset", "gaming headset pro", etc.
+            import re
+
+            # Common patterns for product names in order messages
+            patterns = [
+                r"\d+\s+([a-zA-Z\s_]+?)(?:\s+for|\s+to|\s*$)",  # "2 gaming headset pro for"
+                r"(?:create|order|place).*?(\w+(?:\s+\w+)*?)(?:\s+for|\s+to|\s*$)",  # "create order gaming headset"
+                r"(\w+(?:\s+\w+)*?)(?:\s+stock|\s+inventory)",  # "gaming headset stock"
+            ]
+
+            potential_products = set()
+
+            for pattern in patterns:
+                matches = re.findall(pattern, message_lower, re.IGNORECASE)
+                for match in matches:
+                    if isinstance(match, str):
+                        # Clean up the match
+                        clean_match = match.strip()
+                        if len(clean_match) > 2 and clean_match not in [
+                            "for",
+                            "to",
+                            "the",
+                            "and",
+                            "with",
+                            "of",
+                        ]:
+                            potential_products.add(clean_match)
+
+            # Also try common product-related words from the message
+            words = message_lower.split()
+            for i, word in enumerate(words):
+                # Single words that might be products
+                if word in [
+                    "laptop",
+                    "headset",
+                    "microphone",
+                    "phone",
+                    "iphone",
+                    "usb",
+                    "drive",
+                ]:
+                    potential_products.add(word)
+
+                # Multi-word combinations
+                if i < len(words) - 1:
+                    two_word = f"{word} {words[i + 1]}"
+                    potential_products.add(two_word)
+
+                if i < len(words) - 2:
+                    three_word = f"{word} {words[i + 1]} {words[i + 2]}"
+                    potential_products.add(three_word)
+
+            # Try to find matches using dynamic mapping
+            for product_term in potential_products:
+                mapped_id = await self._get_dynamic_product_mapping(product_term)
+                if mapped_id:
+                    logger.info(
+                        f"Fallback: Found '{product_term}' in message, mapping to {mapped_id}"
+                    )
+                    return mapped_id
+
+        except Exception as e:
+            logger.warning(f"Error in fallback product extraction: {e}")
+
+        return None
+
     async def execute_ecommerce_action(
         self, intent_analysis: Dict[str, Any], user_message: str = ""
     ) -> Dict[str, Any]:
         """Execute the determined ecommerce action"""
         action = intent_analysis.get("action")
         parameters = intent_analysis.get("parameters", {})
+
+        # Store the original user message for fallback processing
+        intent_analysis["user_message"] = user_message
 
         if not self.ecommerce_agent:
             raise Exception("Ecommerce agent not initialized")
@@ -1271,7 +1321,7 @@ Want to create another product? Just say "create a new product" or "help me crea
             "update_stock": "update_stock",
         }
 
-        if action not in action_mapping:
+        if action not in action_mapping and action != "analyze_best_customers":
             raise Exception(f"Unknown action: {action}")
 
         # Handle special cases
@@ -1285,40 +1335,69 @@ Want to create another product? Just say "create a new product" or "help me crea
             return await self.help_choose_customer_contact()
         elif action == "help_create_order":
             return await self.help_create_order()
+        elif action == "analyze_best_customers":
+            return await self.analyze_best_customers()
 
         # Special parameter validation and mapping for create_order
         if action == "create_order" and parameters:
             # Validate and map customer_id and product_id if needed
             customer_id = parameters.get("customer_id", "")
-            if customer_id and not customer_id.startswith("cust_"):
+
+            # If no customer_id provided, default to demo customer for simplicity
+            if not customer_id:
+                parameters["customer_id"] = "cust_000001"  # Use demo customer
+                logger.info(
+                    "No customer specified, defaulting to 'cust_000001' (Demo User)"
+                )
+            elif not customer_id.startswith("cust_"):
                 # Map common customer terms to actual customer ID
-                if customer_id.lower() in ["demo", "test", "default"]:
+                customer_lower = customer_id.lower()
+                if customer_lower in [
+                    "demo",
+                    "test",
+                    "default",
+                    "demo_customer",
+                    "demo_user",
+                    "demo customer",
+                    "demo user",
+                ]:
                     parameters["customer_id"] = "cust_000001"  # Use first customer
                     logger.info(f"Mapped customer '{customer_id}' to 'cust_000001'")
+
+            # Ensure currency is set
+            if "currency" not in parameters:
+                parameters["currency"] = "USD"
+                logger.info("No currency specified, defaulting to 'USD'")
 
             # Check items for product_id mapping
             items = parameters.get("items", [])
             for item in items:
                 product_id = item.get("product_id", "")
+
+                # If product_id is empty, try fallback extraction from the original message
+                if not product_id:
+                    logger.warning(f"Empty product_id in order item: {item}")
+                    # Try to extract product from the original user message
+                    original_message = intent_analysis.get("user_message", "")
+                    if original_message:
+                        fallback_product_id = await self._extract_product_from_message(
+                            original_message
+                        )
+                        if fallback_product_id:
+                            item["product_id"] = fallback_product_id
+                            logger.info(
+                                f"Fallback: Set product_id to {fallback_product_id}"
+                            )
+                            continue
+
                 if product_id and not product_id.startswith("prod_"):
-                    # Map common product terms to actual product IDs
-                    product_mapping = {
-                        "laptop": "prod_000004",  # Laptop Pro
-                        "laptops": "prod_000004",
-                        "microphone": "prod_000010",
-                        "microphones": "prod_000010",
-                        "headset": "prod_000009",
-                        "headsets": "prod_000009",
-                        "iphone": "prod_000007",
-                        "phone": "prod_000007",
-                        "phones": "prod_000007",
-                        "usb": "prod_000006",
-                        "drive": "prod_000006",
-                    }
-                    mapped_id = product_mapping.get(product_id.lower())
+                    # Use dynamic product mapping instead of hardcoded mapping
+                    mapped_id = await self._get_dynamic_product_mapping(product_id)
                     if mapped_id:
                         item["product_id"] = mapped_id
-                        logger.info(f"Mapped product '{product_id}' to '{mapped_id}'")
+                        logger.info(
+                            f"Mapped product '{product_id}' to '{mapped_id}' for order"
+                        )
 
         # Special parameter mapping for get_product
         elif action == "get_product" and parameters:
@@ -1342,9 +1421,9 @@ Want to create another product? Just say "create a new product" or "help me crea
             # The update_stock method expects 'product_id', 'quantity', 'operation'
             # but the chatbot might provide 'search_term' or other variations
             if "search_term" in parameters:
-                # Map search term to product_id using smart product mapping
+                # Map search term to product_id using dynamic product mapping
                 search_term = parameters.pop("search_term").lower()
-                mapped_id = self._smart_product_mapping(search_term)
+                mapped_id = await self._get_dynamic_product_mapping(search_term)
                 if mapped_id:
                     parameters["product_id"] = mapped_id
                     logger.info(
@@ -1362,25 +1441,25 @@ Want to create another product? Just say "create a new product" or "help me crea
                     or product_id == "None"
                     or not product_id.startswith("prod_")
                 ):
-                    # Try to map using smart product mapping
-                    mapped_id = self._smart_product_mapping(str(product_id).lower())
+                    # Try to map using dynamic product mapping
+                    mapped_id = await self._get_dynamic_product_mapping(
+                        str(product_id).lower()
+                    )
                     if mapped_id:
                         parameters["product_id"] = mapped_id
                         logger.info(
                             f"Mapped product '{product_id}' to '{mapped_id}' for stock update"
                         )
                     else:
-                        # Default to laptop if no clear product specified
-                        parameters["product_id"] = "prod_000004"
-                        logger.info(
-                            f"Defaulting unclear product '{product_id}' to 'prod_000004' (Laptop Pro)"
+                        # No default fallback - let the action handle invalid product_id
+                        logger.warning(
+                            f"Could not map product '{product_id}' to any existing product"
                         )
+                        parameters["product_id"] = None
             else:
-                # If no product_id at all, default to laptop
-                parameters["product_id"] = "prod_000004"
-                logger.info(
-                    "No product_id specified, defaulting to 'prod_000004' (Laptop Pro)"
-                )
+                # No default fallback - let the action handle invalid product_id
+                logger.warning("No product_id specified for stock update")
+                parameters["product_id"] = None
 
             # Determine operation based on original user message context
             # Check the original user message FIRST, then intent analysis
@@ -1468,6 +1547,23 @@ Want to create another product? Just say "create a new product" or "help me crea
                 )
                 parameters = filtered_params
             sort_info = None
+        elif (
+            action in ["list_customers", "get_customer", "create_customer"]
+            and parameters
+        ):
+            # Customer methods don't support sort_by parameters
+            # Remove sorting parameters that might have been incorrectly added
+            if "sort_by" in parameters or "limit" in parameters:
+                removed_params = {
+                    k: v for k, v in parameters.items() if k in ["sort_by", "limit"]
+                }
+                parameters = {
+                    k: v for k, v in parameters.items() if k not in ["sort_by", "limit"]
+                }
+                logger.info(
+                    f"Removed unsupported sorting parameters for {action}: {removed_params}"
+                )
+            sort_info = None
         else:
             sort_info = None
 
@@ -1527,6 +1623,7 @@ Want to create another product? Just say "create a new product" or "help me crea
         action_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Generate a conversational response using Grok 3"""
+        
         if not self.grok_api_key:
             # Fallback to simple response formatting
             return await self.fallback_response_generation(
@@ -1540,10 +1637,34 @@ Want to create another product? Just say "create a new product" or "help me crea
             context = f"User intent: {intent_analysis.get('intent')}\n"
 
             if action_result:
-                context += f"Action performed: {action_result.get('action')}\n"
-                context += (
-                    f"Result: {json.dumps(action_result.get('result'), indent=2)}\n"
-                )
+                # Debug: Check what type action_result is
+                if not isinstance(action_result, dict):
+                    logger.warning(f"action_result in generate_response_with_grok is not a dict, got {type(action_result)}: {action_result}")
+                    # Convert to a simple success message and continue
+                    context += f"Action completed successfully\n"
+                else:
+                    context += f"Action performed: {action_result.get('action')}\n"
+                    # Handle both old and new action_result formats
+                    if "data" in action_result:
+                        # New format: has 'data', 'success', 'error', etc.
+                        data = action_result.get('data')
+                        if isinstance(data, str):
+                            # Data is a string (like an error message)
+                            context += f"Result: {data}\n"
+                        else:
+                            # Data is an object/list that can be JSON serialized
+                            try:
+                                context += f"Result: {json.dumps(data, indent=2)}\n"
+                            except (TypeError, ValueError) as e:
+                                logger.warning(f"Failed to serialize action_result data: {e}")
+                                context += f"Result: {data}\n"
+                    else:
+                        # Old format: has 'result'
+                        try:
+                            context += f"Result: {json.dumps(action_result.get('result'), indent=2)}\n"
+                        except (TypeError, ValueError) as e:
+                            logger.warning(f"Failed to serialize action_result result: {e}")
+                            context += f"Result: {action_result.get('result')}\n"
 
             system_prompt = """You are a helpful and friendly e-commerce assistant. Based on the user's message and any actions performed, provide a conversational and informative response. 
 
@@ -1601,6 +1722,16 @@ Guidelines:
 
         except Exception as e:
             logger.warning(f"Failed to generate response with Grok: {e}")
+            # If it's a create_order action and was successful, provide a simple success message
+            if (action_result and isinstance(action_result, dict) and 
+                action_result.get('action') == 'create_order' and 
+                action_result.get('success')):
+                return {
+                    "type": "chat_response",
+                    "message": "🎉 **Order Created Successfully!**\n\nYour order has been placed and will be processed shortly.",
+                    "intent": intent_analysis,
+                    "action_result": action_result,
+                }
             return await self.fallback_response_generation(
                 intent_analysis, action_result
             )
@@ -1618,6 +1749,17 @@ Guidelines:
                 "intent": intent_analysis,
             }
 
+        # Ensure action_result is a dictionary before proceeding
+        if not isinstance(action_result, dict):
+            logger.warning(
+                f"action_result is not a dict, got {type(action_result)}: {action_result}"
+            )
+            return {
+                "type": "chat_response",
+                "message": "I processed your request successfully, but had trouble formatting the response.",
+                "intent": intent_analysis,
+            }
+
         action = action_result.get("action")
 
         # Handle the new structure where we have direct data access
@@ -1625,6 +1767,15 @@ Guidelines:
             data = action_result.get("data", [])
             success = action_result.get("success", True)
             error_msg = action_result.get("error", "")
+            
+            # If data is a string, it's likely an error message
+            if isinstance(data, str) and not success:
+                return {
+                    "type": "chat_response",
+                    "message": f"❌ Error: {data}",
+                    "intent": intent_analysis,
+                    "action_result": action_result,
+                }
         else:
             # Fallback for old structure
             result = action_result.get("result")
@@ -1646,7 +1797,7 @@ Guidelines:
 
         # Format response based on action type
         if action == "list_products":
-            if data and len(data) > 0:
+            if data and isinstance(data, list) and len(data) > 0:
                 message = f"📦 I found {len(data)} product(s) in your catalog:\n\n"
                 for product in data[:5]:  # Show first 5
                     # Debug: Check what type of object we have
@@ -1669,7 +1820,7 @@ Guidelines:
                 message = "📦 No products found in your catalog. Would you like to create some?"
 
         elif action == "list_customers":
-            if data and len(data) > 0:
+            if data and isinstance(data, list) and len(data) > 0:
                 message = f"👥 I found {len(data)} customer(s):\n\n"
                 for customer in data[:5]:
                     # Debug: Check what type of object we have
@@ -1704,6 +1855,34 @@ Guidelines:
                     message += f"... and {len(data) - 5} more customers."
             else:
                 message = "👥 No customers found. Ready to add your first customer?"
+
+        elif action == "analyze_best_customers":
+            if data and len(data) > 0:
+                message = f"🏆 **Top Customers by Spending**\n\n"
+                for i, customer in enumerate(data[:5], 1):
+                    name = customer.get("name", "Unknown")
+                    email = customer.get("email", "")
+                    total_spent = customer.get("total_spent", 0)
+                    order_count = customer.get("order_count", 0)
+
+                    # Add medal for top 3
+                    medal = ""
+                    if i == 1:
+                        medal = "🥇 "
+                    elif i == 2:
+                        medal = "🥈 "
+                    elif i == 3:
+                        medal = "🥉 "
+
+                    message += f"{medal}**#{i} {name}**\n"
+                    message += f"  📧 {email}\n"
+                    message += f"  💰 Total Spent: ${total_spent:.2f}\n"
+                    message += f"  📦 Orders: {order_count}\n\n"
+
+                if len(data) > 5:
+                    message += f"... and {len(data) - 5} more customers."
+            else:
+                message = "👥 No customers found or no order data available."
 
         elif action == "get_customer":
             if data and len(data) > 0:
@@ -1777,20 +1956,10 @@ Guidelines:
                             product_id = item.get("product_id", "")
                             quantity = item.get("quantity", 0)
 
-                            # Map product IDs to names
-                            product_name = "Unknown Product"
-                            if product_id == "prod_000010":
-                                product_name = "microphone Egile"
-                            elif product_id == "prod_000004":
-                                product_name = "Laptop Pro"
-                            elif product_id == "prod_000009":
-                                product_name = "Gaming Headset Pro"
-                            elif product_id == "prod_000007":
-                                product_name = "Test iPhone"
-                            elif product_id == "prod_000005":
-                                product_name = "Wireless Mouse"
-                            elif product_id == "prod_000006":
-                                product_name = "USB Drive"
+                            # Get product name from database
+                            product_name = await self._get_product_name_by_id(
+                                product_id
+                            )
 
                             if quantity > 1:
                                 product_names.append(f"{quantity}x {product_name}")
@@ -1948,6 +2117,18 @@ Guidelines:
                 order_id = intent_analysis.get("parameters", {}).get("order_id", "")
                 message = f"📋 Order not found. Please check the order ID: '{order_id}'"
         elif action == "create_order":
+            # Check for errors first
+            if not success or error_msg:
+                message = f"❌ **Order Creation Failed**\n\n{error_msg}"
+                if "customer" in error_msg.lower():
+                    message += "\n\n💡 **Tip:** Try specifying a customer or use 'demo' customer."
+                return {
+                    "type": "chat_response",
+                    "message": message,
+                    "intent": intent_analysis,
+                    "action_result": action_result,
+                }
+
             if data and len(data) > 0:
                 # Parse the order creation response
                 try:
@@ -2028,8 +2209,8 @@ Guidelines:
 
                     if product_details:
                         # Get the actual current stock level from the database
-                        current_stock = product_details.get('stock_quantity', 0)
-                        
+                        current_stock = product_details.get("stock_quantity", 0)
+
                         # Create detailed confirmation message
                         message = "📦 **Stock Updated Successfully!**\n\n"
                         message += "**Product Details:**\n"
@@ -2366,3 +2547,267 @@ To create an order, I need three pieces of information:
         except Exception as e:
             logger.warning(f"Failed to fetch product details for {product_id}: {e}")
         return None
+
+    async def _get_dynamic_product_mapping(self, search_term: str) -> Optional[str]:
+        """
+        Dynamic product mapping using MCP server search functionality.
+        Efficiently queries only relevant products instead of fetching all products.
+        """
+        try:
+            search_term = search_term.lower().strip()
+            if not search_term:
+                return None
+
+            logger.info(f"Dynamic mapping search for: '{search_term}'")
+
+            # Create search variations to handle different formats
+            search_variations = [
+                search_term,
+                search_term.replace(
+                    "_", " "
+                ),  # "microphone_egile" -> "microphone egile"
+                search_term.replace(
+                    " ", "_"
+                ),  # "microphone egile" -> "microphone_egile"
+                search_term.replace(" ", ""),  # "microphone egile" -> "microphoneegile"
+            ]
+
+            # Add individual words for broader search
+            words = search_term.replace("_", " ").split()
+            if len(words) > 1:
+                search_variations.extend(
+                    words
+                )  # Add individual words like "microphone", "egile"
+
+            # Remove duplicates while preserving order
+            search_variations = list(dict.fromkeys(search_variations))
+
+            all_products = []
+
+            # Try each search variation
+            for variation in search_variations:
+                logger.info(f"Trying search variation: '{variation}'")
+                result = await self.ecommerce_agent.search_products(query=variation)
+
+                if result.success and result.data:
+                    logger.info(
+                        f"Found {len(result.data)} products with variation '{variation}'"
+                    )
+                    all_products.extend(result.data)
+                else:
+                    logger.info(f"No products found with variation '{variation}'")
+
+            # Remove duplicate products (by ID)
+            seen_ids = set()
+            unique_products = []
+            for product in all_products:
+                if isinstance(product, dict):
+                    product_id = product.get("id", "")
+                    if product_id and product_id not in seen_ids:
+                        seen_ids.add(product_id)
+                        unique_products.append(product)
+
+            products = unique_products
+            logger.info(f"Total unique products found: {len(products)}")
+
+            if not products:
+                logger.info(
+                    f"Search variations failed, trying fallback search of all products for: '{search_term}'"
+                )
+                # Fallback: search all products if targeted search fails
+                all_result = await self.ecommerce_agent.get_all_products()
+                if all_result.success and all_result.data:
+                    products = all_result.data
+                    logger.info(
+                        f"Fallback: Got {len(products)} products to search through"
+                    )
+                else:
+                    logger.info(f"Fallback also failed for: '{search_term}'")
+                    return None
+
+            if not products:
+                logger.info(f"No products found for: '{search_term}'")
+                return None
+
+            # Find the best match from the search results
+            best_match = None
+            best_score = 0.0
+
+            for product in products:
+                if isinstance(product, dict):
+                    product_name = product.get("name", "").lower()
+                    product_sku = product.get("sku", "").lower()
+                    product_description = product.get("description", "").lower()
+                    product_id = product.get("id", "")
+
+                    # Check for exact matches first (highest priority)
+                    if search_term == product_name:
+                        logger.info(
+                            f"Dynamic mapping: '{search_term}' → '{product_id}' (exact name match)"
+                        )
+                        return product_id
+                    elif search_term == product_sku:
+                        logger.info(
+                            f"Dynamic mapping: '{search_term}' → '{product_id}' (exact SKU match)"
+                        )
+                        return product_id
+
+                    # Check for high-confidence partial matches
+                    # Normalize both search term and product name for comparison
+                    normalized_search = search_term.replace("_", " ").replace("-", " ")
+                    normalized_product = product_name.replace("_", " ").replace(
+                        "-", " "
+                    )
+
+                    search_words = normalized_search.split()
+                    product_words = normalized_product.split()
+
+                    # Score based on word matches in name
+                    word_matches = sum(
+                        1 for word in search_words if word in product_words
+                    )
+                    name_score = word_matches / len(search_words) if search_words else 0
+
+                    # Score based on substring matches
+                    substring_score = 0
+                    if normalized_search in normalized_product:
+                        substring_score = 0.8
+                    elif search_term in product_name:
+                        substring_score = 0.8
+                    elif search_term in product_description:
+                        substring_score = 0.6
+                    elif search_term in product_sku:
+                        substring_score = 0.7
+
+                    # Use sequence matching for fuzzy similarity (use normalized versions)
+                    from difflib import SequenceMatcher
+
+                    similarity_score = SequenceMatcher(
+                        None, normalized_search, normalized_product
+                    ).ratio()
+
+                    # Combine scores (weighted)
+                    total_score = (
+                        (name_score * 0.4)
+                        + (substring_score * 0.4)
+                        + (similarity_score * 0.2)
+                    )
+
+                    if (
+                        total_score > best_score and total_score > 0.6
+                    ):  # Minimum threshold
+                        best_match = product_id
+                        best_score = total_score
+
+            if best_match:
+                # Get the matched product name for logging
+                matched_product = next(
+                    (p for p in products if p.get("id") == best_match), {}
+                )
+                matched_name = matched_product.get("name", "unknown")
+                logger.info(
+                    f"Dynamic mapping: '{search_term}' → '{best_match}' (matched '{matched_name.lower()}', score: {best_score:.2f})"
+                )
+                return best_match
+            else:
+                logger.info(
+                    f"No suitable match found for '{search_term}' (best score: {best_score:.2f})"
+                )
+                return None
+
+        except Exception as e:
+            logger.error(f"Error in dynamic product mapping for '{search_term}': {e}")
+            return None
+
+    async def _get_product_name_by_id(self, product_id: str) -> str:
+        """Get product name from MCP server by product ID"""
+        try:
+            # Use MCP server's get_product method
+            result = await self.ecommerce_agent.get_product(
+                identifier=product_id, search_by="id"
+            )
+
+            if result.success and result.data:
+                if isinstance(result.data, list) and len(result.data) > 0:
+                    product = result.data[0]
+                elif isinstance(result.data, dict):
+                    product = result.data
+                else:
+                    logger.warning(
+                        f"Unexpected product data format for {product_id}: {result.data}"
+                    )
+                    return "Unknown Product"
+
+                return product.get("name", "Unknown Product")
+            else:
+                logger.warning(f"Product not found: {product_id}")
+                return "Unknown Product"
+
+        except Exception as e:
+            logger.error(f"Error fetching product name for {product_id}: {e}")
+            return "Unknown Product"
+
+    async def analyze_best_customers(self) -> Dict[str, Any]:
+        """Analyze customers to find the best ones by total spending"""
+        try:
+            # Get all customers and orders
+            customers_result = await self.ecommerce_agent.get_all_customers()
+            orders_result = await self.ecommerce_agent.get_all_orders()
+
+            if not customers_result.success or not orders_result.success:
+                return {
+                    "success": False,
+                    "error": "Could not retrieve customer or order data",
+                    "data": [],
+                }
+
+            customers = customers_result.data or []
+            orders = orders_result.data or []
+
+            # Calculate total spending per customer
+            customer_spending = {}
+
+            for order in orders:
+                if isinstance(order, dict):
+                    customer_id = order.get("customer_id", "")
+                    total_amount = float(order.get("total_amount", 0))
+
+                    if customer_id:
+                        customer_spending[customer_id] = (
+                            customer_spending.get(customer_id, 0) + total_amount
+                        )
+
+            # Match customer data with spending
+            customer_analysis = []
+            for customer in customers:
+                if isinstance(customer, dict):
+                    customer_id = customer.get("id", "")
+                    total_spent = customer_spending.get(customer_id, 0)
+
+                    customer_analysis.append(
+                        {
+                            "id": customer_id,
+                            "name": f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip(),
+                            "email": customer.get("email", ""),
+                            "phone": customer.get("phone", ""),
+                            "total_spent": total_spent,
+                            "order_count": sum(
+                                1
+                                for order in orders
+                                if order.get("customer_id") == customer_id
+                            ),
+                        }
+                    )
+
+            # Sort by total spending (descending)
+            customer_analysis.sort(key=lambda x: x["total_spent"], reverse=True)
+
+            return {
+                "success": True,
+                "data": customer_analysis,
+                "action": "analyze_best_customers",
+            }
+
+        except Exception as e:
+            logger.error(f"Error analyzing best customers: {e}")
+            return {"success": False, "error": str(e), "data": []}

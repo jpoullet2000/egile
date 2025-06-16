@@ -1,38 +1,43 @@
 #!/usr/bin/env python3
 """
-Quick test to check if post_process_product_list method exists
+Quick test for order creation
 """
 
+import asyncio
 import sys
 import os
 
 sys.path.append("/home/jbp/projects/egile/chatbot-agent")
 
-try:
-    from grok_agent import GrokEcommerceAgent
+from grok_agent import GrokEcommerceAgent
 
+
+async def quick_test():
+    print("Starting quick test...")
     agent = GrokEcommerceAgent()
 
-    print("✅ Agent created successfully")
-    print(
-        f"Has post_process_product_list: {hasattr(agent, 'post_process_product_list')}"
-    )
+    try:
+        await agent.start()
+        print("Agent started")
 
-    if hasattr(agent, "post_process_product_list"):
-        method = getattr(agent, "post_process_product_list")
-        print(f"Method type: {type(method)}")
-        print(f"Method callable: {callable(method)}")
+        # Simple test
+        response = await agent.process_message(
+            "create order for demo for 2 microphones"
+        )
+        print(f"Response type: {response.get('type')}")
+        print(f"Message: {response.get('message')}")
 
-    # List all methods starting with 'post'
-    post_methods = [m for m in dir(agent) if m.startswith("post")]
-    print(f"Methods starting with 'post': {post_methods}")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
 
-    # List all methods
-    all_methods = [m for m in dir(agent) if not m.startswith("_")]
-    print(f"All public methods: {all_methods}")
+        traceback.print_exc()
+    finally:
+        try:
+            await agent.stop()
+        except:
+            pass
 
-except Exception as e:
-    print(f"❌ Error: {e}")
-    import traceback
 
-    traceback.print_exc()
+if __name__ == "__main__":
+    asyncio.run(quick_test())

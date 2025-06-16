@@ -240,9 +240,29 @@ class EcommerceAgent:
             result = response.get("result", {})
             content = result.get("content", [])
 
+            # Parse JSON from text content if it's in MCP format
+            parsed_data = None
+            if content and isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_content = item.get("text", "")
+                        try:
+                            import json
+
+                            parsed_data = json.loads(text_content)
+                            break
+                        except json.JSONDecodeError:
+                            # If it's not JSON, keep the raw text
+                            parsed_data = text_content
+                            break
+
+            # If we couldn't parse JSON, use the original content
+            if parsed_data is None:
+                parsed_data = content
+
             return AgentResponse(
                 success=True,
-                data=content,
+                data=parsed_data,
                 message=f"Tool {tool_name} executed successfully",
             )
         except Exception as e:
