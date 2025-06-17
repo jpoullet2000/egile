@@ -153,6 +153,14 @@ For example:
 - "most expensive products" = list_products with sort_by: "price_desc"
 - "cheapest products" = list_products with sort_by: "price_asc"
 - "products by price" = list_products with sort_by: "price_desc"
+- "most sold products" = analyze_most_sold_products
+- "best selling products" = analyze_most_sold_products
+- "top selling products" = analyze_most_sold_products
+- "products between $10 and $30" = search_products with min_price: 10, max_price: 30
+- "products under $50" = search_products with max_price: 50
+- "products over $100" = search_products with min_price: 100
+- "show me details for USB Drive" = get_product with search_term: "USB Drive"
+- "details for microphone" = get_product with search_term: "microphone"
 - "how can I contact the customer?" = help_choose_customer_contact (show customer list)
 - "contact customer john@example.com" = get_customer with identifier: "john@example.com", search_by: "email"
 - "customer details for john@example.com" = get_customer with identifier: "john@example.com", search_by: "email"
@@ -168,8 +176,8 @@ Available operations:
 - list_products: Show all products (supports parameters: sort_by: "price_desc"|"price_asc"|"name"|"stock", limit: number)
 - create_product: Create a new product (needs: name, description, price, sku, category, stock_quantity)
 - help_create_product: Provide guidance on creating products (when user asks for help but provides no details)
-- get_product: Get product details (needs: product_id or sku)
-- search_products: Search products (needs: query)
+- get_product: Get product details (needs: search_term for product name, or product_id, or sku)
+- search_products: Search products (needs: query, optional: min_price, max_price, category, in_stock_only)
 - list_customers: Show all customers
 - create_customer: Create customer (needs: email, first_name, last_name, optional: phone)
 - get_customer: Get customer details (needs: identifier and search_by: "id"|"email")
@@ -178,10 +186,14 @@ Available operations:
 - get_order: Get order details (needs: order_id)
 - get_low_stock_products: Show low stock items (optional: threshold)
 - update_stock: Update product stock (needs: product_id, quantity)
+- analyze_most_sold_products: Analyze sales data to find best-selling products
 
 IMPORTANT: 
 - Be generous in interpreting user intent
 - For product queries with sorting (expensive, cheap, etc.), use list_products with appropriate sort_by parameter
+- For price range queries ("between $X and $Y", "under $X", "over $X"), use search_products with min_price and/or max_price parameters
+- Extract price values from currency formats ($10, $30, etc.) and convert to numbers
+- For get_product with product names, always use search_term: {"action": "get_product", "parameters": {"search_term": "product name"}}
 - If someone asks about "most expensive" or "highest priced", use sort_by: "price_desc"
 - If someone asks about "cheapest" or "lowest priced", use sort_by: "price_asc"
 - You can add a limit parameter for "top 5" or similar requests
@@ -382,6 +394,63 @@ Respond with JSON format:
                     "confidence": 0.9,
                 }
 
+        # Price range patterns - check these before general product patterns
+        import re
+
+        # Pattern for "between $X and $Y"
+        between_match = re.search(
+            r"between\s*\$?(\d+(?:\.\d{2})?)\s*and\s*\$?(\d+(?:\.\d{2})?)",
+            message_lower,
+        )
+        if between_match:
+            min_price = float(between_match.group(1))
+            max_price = float(between_match.group(2))
+            return {
+                "intent": f"Find products between ${min_price} and ${max_price}",
+                "action": "search_products",
+                "parameters": {
+                    "query": "",  # Empty query to search all products
+                    "min_price": min_price,
+                    "max_price": max_price,
+                },
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        # Pattern for "under $X" or "below $X"
+        under_match = re.search(
+            r"(?:under|below|less than)\s*\$?(\d+(?:\.\d{2})?)", message_lower
+        )
+        if under_match:
+            max_price = float(under_match.group(1))
+            return {
+                "intent": f"Find products under ${max_price}",
+                "action": "search_products",
+                "parameters": {
+                    "query": "",  # Empty query to search all products
+                    "max_price": max_price,
+                },
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        # Pattern for "over $X" or "above $X" or "more than $X"
+        over_match = re.search(
+            r"(?:over|above|more than)\s*\$?(\d+(?:\.\d{2})?)", message_lower
+        )
+        if over_match:
+            min_price = float(over_match.group(1))
+            return {
+                "intent": f"Find products over ${min_price}",
+                "action": "search_products",
+                "parameters": {
+                    "query": "",  # Empty query to search all products
+                    "min_price": min_price,
+                },
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
         # Product operations - more flexible patterns
         product_list_patterns = [
             "what are my products",
@@ -406,6 +475,32 @@ Respond with JSON format:
             return {
                 "intent": "List all products",
                 "action": "list_products",
+                "parameters": {},
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
+        # Most sold products patterns
+        most_sold_patterns = [
+            "most sold products",
+            "best selling products",
+            "top selling products",
+            "bestselling products",
+            "most popular products",
+            "highest selling products",
+            "most sold items",
+            "best sellers",
+            "top sellers",
+            "what sells the most",
+            "which products sell most",
+            "most purchased products",
+            "most ordered products",
+        ]
+
+        if any(pattern in message_lower for pattern in most_sold_patterns):
+            return {
+                "intent": "Find most sold products by sales volume",
+                "action": "analyze_most_sold_products",
                 "parameters": {},
                 "requires_action": True,
                 "confidence": 0.9,
@@ -585,6 +680,50 @@ Respond with JSON format:
                 "requires_action": True,
                 "confidence": 0.9,
             }
+
+        # Customer creation patterns
+        customer_creation_patterns = [
+            "create customer",
+            "add customer",
+            "new customer",
+            "add new customer",
+            "create a customer",
+            "add a customer",
+            "create a new customer",
+            "i want to create a customer",
+            "i want to add a customer",
+            "help me create a customer",
+            "register customer",
+            "sign up customer",
+            "customer registration",
+        ]
+
+        if any(pattern in message_lower for pattern in customer_creation_patterns):
+            # Extract customer information from the message
+            params = self.extract_customer_params(message)
+            
+            # Check if we have all required fields (email, first_name, last_name)
+            required_fields = ["email", "first_name", "last_name"]
+            missing_fields = [field for field in required_fields if not params.get(field)]
+            
+            if missing_fields:
+                # Return a helper response asking for missing information
+                return {
+                    "intent": f"Request missing customer information: {', '.join(missing_fields)}",
+                    "action": "help_create_customer",
+                    "parameters": {"provided_params": params, "missing_fields": missing_fields},
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+            else:
+                # All required fields provided, proceed with customer creation
+                return {
+                    "intent": "Create a new customer",
+                    "action": "create_customer",
+                    "parameters": params,
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
 
         # Create product patterns
         create_product_patterns = [
@@ -784,6 +923,40 @@ Respond with JSON format:
                 "confidence": 0.9,
             }
 
+        # Product details patterns
+        product_details_patterns = [
+            "show details for",
+            "details for",
+            "show me details for",
+            "get details for",
+            "product details for",
+            "details of",
+            "show details of",
+            "information about",
+            "info about",
+            "tell me about",
+        ]
+
+        if any(pattern in message_lower for pattern in product_details_patterns):
+            # Extract product name from the message
+            product_name = None
+            for pattern in product_details_patterns:
+                if pattern in message_lower:
+                    # Get text after the pattern
+                    after_pattern = message_lower.split(pattern, 1)[1].strip()
+                    # Remove common words and get the product name
+                    product_name = after_pattern.replace("the", "").strip()
+                    break
+
+            if product_name:
+                return {
+                    "intent": f"Get details for product: {product_name}",
+                    "action": "get_product",
+                    "parameters": {"search_term": product_name},
+                    "requires_action": True,
+                    "confidence": 0.9,
+                }
+
         # Search products
         if "search" in message_lower and any(
             word in message_lower for word in ["product", "item", "for"]
@@ -921,6 +1094,53 @@ Respond with JSON format:
             return {"partial": True, "name": simple_name_match.group(1).strip()}
 
         return {}
+
+    def extract_customer_params(self, message: str) -> Dict[str, Any]:
+        """Extract customer parameters from message"""
+        import re
+
+        params = {}
+
+        # Try to extract email (most reliable identifier)
+        email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message)
+        if email_match:
+            params["email"] = email_match.group()
+
+        # Try to extract names from various patterns
+        # Pattern 1: "create customer John Doe" (first and last name)
+        name_after_customer = re.search(r'(?:customer|add|create)\s+(?:a\s+)?(?:new\s+)?(?:customer\s+)?([A-Z][a-zA-Z]*)\s+([A-Z][a-zA-Z]*)', message, re.IGNORECASE)
+        if name_after_customer:
+            params["first_name"] = name_after_customer.group(1)
+            params["last_name"] = name_after_customer.group(2)
+
+        # Pattern 2: "John Doe" in quotes
+        quoted_name = re.search(r'["\']([A-Z][a-zA-Z]*)\s+([A-Z][a-zA-Z]*)["\']', message)
+        if quoted_name and not params.get("first_name"):
+            params["first_name"] = quoted_name.group(1)
+            params["last_name"] = quoted_name.group(2)
+
+        # Pattern 3: Structured format like "first_name: John, last_name: Doe, email: john@example.com"
+        first_name_match = re.search(r'first[_\s]?name[:\s]+([A-Za-z]+)', message, re.IGNORECASE)
+        if first_name_match:
+            params["first_name"] = first_name_match.group(1)
+
+        last_name_match = re.search(r'last[_\s]?name[:\s]+([A-Za-z]+)', message, re.IGNORECASE)
+        if last_name_match:
+            params["last_name"] = last_name_match.group(1)
+
+        email_structured = re.search(r'email[:\s]+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})', message, re.IGNORECASE)
+        if email_structured:
+            params["email"] = email_structured.group(1)
+
+        # Try to extract phone number (optional)
+        phone_match = re.search(r'phone[:\s]*([+]?[\d\s\-\(\)]{10,})', message, re.IGNORECASE)
+        if phone_match:
+            # Clean up the phone number
+            phone = re.sub(r'[^\d+]', '', phone_match.group(1))
+            if len(phone) >= 10:  # Minimum valid phone length
+                params["phone"] = phone_match.group(1).strip()
+
+        return params
 
     async def help_create_product(self) -> Dict[str, Any]:
         """Start interactive product creation flow"""
@@ -1321,7 +1541,10 @@ Want to create another product? Just say "create a new product" or "help me crea
             "update_stock": "update_stock",
         }
 
-        if action not in action_mapping and action != "analyze_best_customers":
+        if action not in action_mapping and action not in [
+            "analyze_best_customers",
+            "analyze_most_sold_products",
+        ]:
             raise Exception(f"Unknown action: {action}")
 
         # Handle special cases
@@ -1337,6 +1560,8 @@ Want to create another product? Just say "create a new product" or "help me crea
             return await self.help_create_order()
         elif action == "analyze_best_customers":
             return await self.analyze_best_customers()
+        elif action == "analyze_most_sold_products":
+            return await self.analyze_most_sold_products()
 
         # Special parameter validation and mapping for create_order
         if action == "create_order" and parameters:
@@ -1402,8 +1627,28 @@ Want to create another product? Just say "create a new product" or "help me crea
         # Special parameter mapping for get_product
         elif action == "get_product" and parameters:
             # The get_product method expects 'identifier' and 'search_by' parameters
-            # but the chatbot might provide 'product_id' or 'sku'
-            if "product_id" in parameters:
+            # but the chatbot might provide 'product_id' or 'sku' or 'search_term'
+            if "search_term" in parameters:
+                # Map search term to product_id using dynamic product mapping
+                search_term = parameters.pop("search_term").lower()
+                mapped_id = await self._get_dynamic_product_mapping(search_term)
+                if mapped_id:
+                    parameters["identifier"] = mapped_id
+                    parameters["search_by"] = "id"
+                    logger.info(
+                        f"Mapped search term '{search_term}' to product ID '{mapped_id}' for get_product"
+                    )
+                else:
+                    logger.warning(
+                        f"Could not map search term '{search_term}' to a product ID"
+                    )
+                    # Return an error result
+                    return {
+                        "success": False,
+                        "message": f"Product not found: {search_term}",
+                        "error": f"No product found matching '{search_term}'",
+                    }
+            elif "product_id" in parameters:
                 parameters["identifier"] = parameters.pop("product_id")
                 parameters["search_by"] = "id"
             elif "sku" in parameters:
@@ -1623,7 +1868,7 @@ Want to create another product? Just say "create a new product" or "help me crea
         action_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Generate a conversational response using Grok 3"""
-        
+
         if not self.grok_api_key:
             # Fallback to simple response formatting
             return await self.fallback_response_generation(
@@ -1639,7 +1884,9 @@ Want to create another product? Just say "create a new product" or "help me crea
             if action_result:
                 # Debug: Check what type action_result is
                 if not isinstance(action_result, dict):
-                    logger.warning(f"action_result in generate_response_with_grok is not a dict, got {type(action_result)}: {action_result}")
+                    logger.warning(
+                        f"action_result in generate_response_with_grok is not a dict, got {type(action_result)}: {action_result}"
+                    )
                     # Convert to a simple success message and continue
                     context += f"Action completed successfully\n"
                 else:
@@ -1647,7 +1894,7 @@ Want to create another product? Just say "create a new product" or "help me crea
                     # Handle both old and new action_result formats
                     if "data" in action_result:
                         # New format: has 'data', 'success', 'error', etc.
-                        data = action_result.get('data')
+                        data = action_result.get("data")
                         if isinstance(data, str):
                             # Data is a string (like an error message)
                             context += f"Result: {data}\n"
@@ -1656,14 +1903,18 @@ Want to create another product? Just say "create a new product" or "help me crea
                             try:
                                 context += f"Result: {json.dumps(data, indent=2)}\n"
                             except (TypeError, ValueError) as e:
-                                logger.warning(f"Failed to serialize action_result data: {e}")
+                                logger.warning(
+                                    f"Failed to serialize action_result data: {e}"
+                                )
                                 context += f"Result: {data}\n"
                     else:
                         # Old format: has 'result'
                         try:
                             context += f"Result: {json.dumps(action_result.get('result'), indent=2)}\n"
                         except (TypeError, ValueError) as e:
-                            logger.warning(f"Failed to serialize action_result result: {e}")
+                            logger.warning(
+                                f"Failed to serialize action_result result: {e}"
+                            )
                             context += f"Result: {action_result.get('result')}\n"
 
             system_prompt = """You are a helpful and friendly e-commerce assistant. Based on the user's message and any actions performed, provide a conversational and informative response. 
@@ -1723,9 +1974,12 @@ Guidelines:
         except Exception as e:
             logger.warning(f"Failed to generate response with Grok: {e}")
             # If it's a create_order action and was successful, provide a simple success message
-            if (action_result and isinstance(action_result, dict) and 
-                action_result.get('action') == 'create_order' and 
-                action_result.get('success')):
+            if (
+                action_result
+                and isinstance(action_result, dict)
+                and action_result.get("action") == "create_order"
+                and action_result.get("success")
+            ):
                 return {
                     "type": "chat_response",
                     "message": "🎉 **Order Created Successfully!**\n\nYour order has been placed and will be processed shortly.",
@@ -1767,7 +2021,7 @@ Guidelines:
             data = action_result.get("data", [])
             success = action_result.get("success", True)
             error_msg = action_result.get("error", "")
-            
+
             # If data is a string, it's likely an error message
             if isinstance(data, str) and not success:
                 return {
@@ -1883,6 +2137,36 @@ Guidelines:
                     message += f"... and {len(data) - 5} more customers."
             else:
                 message = "👥 No customers found or no order data available."
+
+        elif action == "analyze_most_sold_products":
+            if data and len(data) > 0:
+                message = "📈 **Most Sold Products**\n\n"
+                for i, product in enumerate(data[:10], 1):
+                    name = product.get("name", "Unknown")
+                    total_sold = product.get("total_sold", 0)
+                    revenue = product.get("revenue_generated", 0)
+                    price = product.get("price", 0)
+                    order_count = product.get("order_count", 0)
+
+                    # Add medal for top 3
+                    medal = ""
+                    if i == 1:
+                        medal = "🥇 "
+                    elif i == 2:
+                        medal = "🥈 "
+                    elif i == 3:
+                        medal = "🥉 "
+
+                    message += f"{medal}**#{i} {name}**\n"
+                    message += f"  📦 Units Sold: {total_sold}\n"
+                    message += f"  💰 Price: ${price:.2f}\n"
+                    message += f"  💵 Revenue: ${revenue:.2f}\n"
+                    message += f"  📋 In {order_count} orders\n\n"
+
+                if len(data) > 10:
+                    message += f"... and {len(data) - 10} more products."
+            else:
+                message = "📦 No products found or no sales data available."
 
         elif action == "get_customer":
             if data and len(data) > 0:
@@ -2298,9 +2582,15 @@ Would you like me to show your customer list to help you find "{search_name}"? �
                         customers = processed_data
                 else:
                     customers = processed_data
+                    logger.info(f"Using data directly, type: {type(customers)}")
+            else:
+                return {
+                    "type": "error",
+                    "message": "❌ Unable to retrieve customer list. Please try again.",
+                }
 
-                if customers and len(customers) > 0:
-                    message = """📞 **Customer Contact Directory**
+            if customers and len(customers) > 0:
+                message = """📞 **Customer Contact Directory**
 
 Here are your customers. To get contact details for any of them, just ask:
 "get customer [email]" or "contact [email]"
@@ -2308,42 +2598,36 @@ Here are your customers. To get contact details for any of them, just ask:
 👥 **Your Customers:**
 
 """
-                    for customer in customers[:10]:  # Show first 10
-                        if isinstance(customer, dict):
-                            name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
-                            email = customer.get("email", "")
-                            phone = customer.get("phone", "No phone")
-                            message += f"• **{name}**\n"
-                            message += f"  📧 {email}\n"
-                            message += f"  📱 {phone}\n\n"
+                for customer in customers[:10]:  # Show first 10
+                    if isinstance(customer, dict):
+                        name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                        email = customer.get("email", "")
+                        phone = customer.get("phone", "No phone")
+                        message += f"• **{name}**\n"
+                        message += f"  📧 {email}\n"
+                        message += f"  📱 {phone}\n\n"
 
-                    if len(customers) > 10:
-                        message += f"... and {len(customers) - 10} more customers.\n\n"
+                if len(customers) > 10:
+                    message += f"... and {len(customers) - 10} more customers.\n\n"
 
-                    message += """💡 **To get full contact details, try:**
+                message += """💡 **To get full contact details, try:**
 • "get customer john@example.com"
 • "contact customer sarah@company.com"
 • "customer details for mike@business.com" """
 
-                    return {
-                        "type": "chat_response",
-                        "action": "help_choose_customer_contact",
-                        "success": True,
-                        "message": message,
-                    }
-                else:
-                    return {
-                        "type": "chat_response",
-                        "action": "help_choose_customer_contact",
-                        "success": True,
-                        "message": "👥 You don't have any customers yet. Would you like to add your first customer?",
-                    }
+                return {
+                    "type": "chat_response",
+                    "action": "help_choose_customer_contact",
+                    "success": True,
+                    "message": message,
+                }
             else:
                 return {
-                    "type": "error",
-                    "message": "❌ Unable to retrieve customer list. Please try again.",
+                    "type": "chat_response",
+                    "action": "help_choose_customer_contact",
+                    "success": True,
+                    "message": "👥 You don't have any customers yet. Would you like to add your first customer?",
                 }
-
         except Exception as e:
             return {
                 "type": "error",
@@ -2692,53 +2976,6 @@ To create an order, I need three pieces of information:
                         + (substring_score * 0.4)
                         + (similarity_score * 0.2)
                     )
-
-                    if (
-                        total_score > best_score and total_score > 0.6
-                    ):  # Minimum threshold
-                        best_match = product_id
-                        best_score = total_score
-
-            if best_match:
-                # Get the matched product name for logging
-                matched_product = next(
-                    (p for p in products if p.get("id") == best_match), {}
-                )
-                matched_name = matched_product.get("name", "unknown")
-                logger.info(
-                    f"Dynamic mapping: '{search_term}' → '{best_match}' (matched '{matched_name.lower()}', score: {best_score:.2f})"
-                )
-                return best_match
-            else:
-                logger.info(
-                    f"No suitable match found for '{search_term}' (best score: {best_score:.2f})"
-                )
-                return None
-
-        except Exception as e:
-            logger.error(f"Error in dynamic product mapping for '{search_term}': {e}")
-            return None
-
-    async def _get_product_name_by_id(self, product_id: str) -> str:
-        """Get product name from MCP server by product ID"""
-        try:
-            # Use MCP server's get_product method
-            result = await self.ecommerce_agent.get_product(
-                identifier=product_id, search_by="id"
-            )
-
-            if result.success and result.data:
-                if isinstance(result.data, list) and len(result.data) > 0:
-                    product = result.data[0]
-                elif isinstance(result.data, dict):
-                    product = result.data
-                else:
-                    logger.warning(
-                        f"Unexpected product data format for {product_id}: {result.data}"
-                    )
-                    return "Unknown Product"
-
-                return product.get("name", "Unknown Product")
             else:
                 logger.warning(f"Product not found: {product_id}")
                 return "Unknown Product"
@@ -2810,4 +3047,81 @@ To create an order, I need three pieces of information:
 
         except Exception as e:
             logger.error(f"Error analyzing best customers: {e}")
+            return {"success": False, "error": str(e), "data": []}
+
+    async def analyze_most_sold_products(self) -> Dict[str, Any]:
+        """Analyze products to find the most sold ones by total quantity"""
+        try:
+            # Get all products and orders
+            products_result = await self.ecommerce_agent.get_all_products()
+            orders_result = await self.ecommerce_agent.get_all_orders()
+
+            if not products_result.success or not orders_result.success:
+                return {
+                    "success": False,
+                    "error": "Could not retrieve product or order data",
+                    "data": [],
+                }
+
+            products = products_result.data or []
+            orders = orders_result.data or []
+
+            # Calculate total quantity sold per product
+            product_sales = {}
+
+            for order in orders:
+                if isinstance(order, dict):
+                    items = order.get("items", [])
+
+                    for item in items:
+                        if isinstance(item, dict):
+                            product_id = item.get("product_id", "")
+                            quantity = int(item.get("quantity", 0))
+
+                            if product_id:
+                                product_sales[product_id] = (
+                                    product_sales.get(product_id, 0) + quantity
+                                )
+
+            # Match product data with sales
+            product_analysis = []
+            for product in products:
+                if isinstance(product, dict):
+                    product_id = product.get("id", "")
+                    total_sold = product_sales.get(product_id, 0)
+
+                    product_analysis.append(
+                        {
+                            "id": product_id,
+                            "name": product.get("name", ""),
+                            "sku": product.get("sku", ""),
+                            "price": float(product.get("price", 0)),
+                            "category": product.get("category", ""),
+                            "stock_quantity": int(product.get("stock_quantity", 0)),
+                            "total_sold": total_sold,
+                            "revenue_generated": total_sold
+                            * float(product.get("price", 0)),
+                            "order_count": sum(
+                                1
+                                for order in orders
+                                if any(
+                                    item.get("product_id") == product_id
+                                    for item in order.get("items", [])
+                                    if isinstance(item, dict)
+                                )
+                            ),
+                        }
+                    )
+
+            # Sort by total sold quantity (descending)
+            product_analysis.sort(key=lambda x: x["total_sold"], reverse=True)
+
+            return {
+                "success": True,
+                "data": product_analysis,
+                "action": "analyze_most_sold_products",
+            }
+
+        except Exception as e:
+            logger.error(f"Error analyzing most sold products: {e}")
             return {"success": False, "error": str(e), "data": []}

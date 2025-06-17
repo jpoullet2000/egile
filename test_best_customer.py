@@ -29,6 +29,21 @@ async def test_best_customer():
         else:
             print("✅ Query processed successfully")
 
+        print("\n" + "=" * 50)
+        print("🧪 Testing 'most sold products' functionality...\n")
+
+        # Test the most sold products query
+        response2 = await agent.process_message("what are the most sold products?")
+
+        print(f"Response type: {response2.get('type')}")
+        print(f"Message: {response2.get('message', '')[:300]}...")
+
+        if "Error" in response2.get("message", ""):
+            print("❌ Error occurred")
+            print(f"Full message: {response2.get('message')}")
+        else:
+            print("✅ Most sold products query processed successfully")
+
     finally:
         await agent.stop()
 
