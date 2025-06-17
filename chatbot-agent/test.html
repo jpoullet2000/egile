@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Agent Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+        .test-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-button {
+            background: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 16px;
+        }
+        .test-button:hover {
+            background: #0056b3;
+        }
+        #testInput {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-size: 16px;
+        }
+        #output {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            min-height: 100px;
+            border: 1px solid #e9ecef;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>🧠 Smart Agent Connection Test</h1>
+        
+        <div>
+            <h3>Connection Status</h3>
+            <div id="connectionStatus">Testing connection...</div>
+        </div>
+        
+        <div>
+            <h3>Test Message</h3>
+            <input type="text" id="testInput" placeholder="Type a test message..." value="Hello Smart Agent!">
+            <button class="test-button" id="testSendButton">Send Test Message</button>
+        </div>
+        
+        <div>
+            <h3>Quick Tests</h3>
+            <button class="test-button" data-message="Show me all products">📦 Test: All Products</button>
+            <button class="test-button" data-message="List all customers">👥 Test: All Customers</button>
+            <button class="test-button" data-message="Help">❓ Test: Help</button>
+        </div>
+        
+        <div>
+            <h3>Output</h3>
+            <div id="output">Waiting for responses...</div>
+        </div>
+    </div>
+
+    <script>
+        class SmartAgentTester {
+            constructor() {
+                this.ws = null;
+                this.isConnected = false;
+                this.init();
+            }
+
+            init() {
+                this.connectToAgent();
+                this.setupEventListeners();
+            }
+
+            connectToAgent() {
+                const ports = [8770, 8769, 8771, 8772];
+                this.tryConnectToPorts(ports, 0);
+            }
+
+            tryConnectToPorts(ports, index) {
+                if (index >= ports.length) {
+                    this.updateStatus('❌ Could not connect to Smart Agent on any port', 'error');
+                    return;
+                }
+
+                const port = ports[index];
+                try {
+                    this.updateStatus(`🔌 Trying to connect to port ${port}...`, 'info');
+                    this.ws = new WebSocket(`ws://localhost:${port}`);
+                    
+                    this.ws.onopen = () => {
+                        this.isConnected = true;
+                        this.updateStatus(`✅ Connected to Smart Agent on port ${port}`, 'success');
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        const response = JSON.parse(event.data);
+                        this.addOutput(`📨 Received: ${JSON.stringify(response, null, 2)}`);
+                    };
+
+                    this.ws.onclose = () => {
+                        this.isConnected = false;
+                        if (index < ports.length - 1) {
+                            setTimeout(() => this.tryConnectToPorts(ports, index + 1), 1000);
+                        } else {
+                            this.updateStatus('🔴 Connection lost', 'error');
+                        }
+                    };
+
+                    this.ws.onerror = (error) => {
+                        console.error(`WebSocket error on port ${port}:`, error);
+                        if (index < ports.length - 1) {
+                            setTimeout(() => this.tryConnectToPorts(ports, index + 1), 500);
+                        }
+                    };
+
+                } catch (error) {
+                    console.error(`Failed to connect to port ${port}:`, error);
+                    if (index < ports.length - 1) {
+                        this.tryConnectToPorts(ports, index + 1);
+                    }
+                }
+            }
+
+            setupEventListeners() {
+                const testInput = document.getElementById('testInput');
+                const testSendButton = document.getElementById('testSendButton');
+                const quickButtons = document.querySelectorAll('.test-button[data-message]');
+
+                testSendButton.addEventListener('click', () => {
+                    const message = testInput.value.trim();
+                    if (message) {
+                        this.sendMessage(message);
+                    }
+                });
+
+                testInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const message = testInput.value.trim();
+                        if (message) {
+                            this.sendMessage(message);
+                        }
+                    }
+                });
+
+                quickButtons.forEach((button, index) => {
+                    button.addEventListener('click', () => {
+                        const message = button.getAttribute('data-message');
+                        if (message) {
+                            this.sendMessage(message);
+                        }
+                    });
+                });
+            }
+
+            sendMessage(message) {
+                if (!this.isConnected) {
+                    this.addOutput('⚠️ Not connected to Smart Agent');
+                    return;
+                }
+
+                this.addOutput(`📤 Sending: ${message}`);
+                
+                const messageObj = {
+                    message: message,
+                    timestamp: Date.now()
+                };
+
+                try {
+                    this.ws.send(JSON.stringify(messageObj));
+                } catch (error) {
+                    this.addOutput(`❌ Error sending message: ${error.message}`);
+                }
+            }
+
+            updateStatus(message, type) {
+                const statusEl = document.getElementById('connectionStatus');
+                statusEl.textContent = message;
+                statusEl.style.color = type === 'error' ? '#dc3545' : type === 'success' ? '#28a745' : '#007bff';
+            }
+
+            addOutput(message) {
+                const outputEl = document.getElementById('output');
+                const timestamp = new Date().toLocaleTimeString();
+                outputEl.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+                outputEl.scrollTop = outputEl.scrollHeight;
+            }
+        }
+
+        // Initialize the tester when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            window.tester = new SmartAgentTester();
+        });
+    </script>
+</body>
+</html>

@@ -62,6 +62,17 @@ class GrokEcommerceAgent:
             if self.product_creation_state:
                 return await self.handle_product_creation_step(user_message)
 
+            # Check if this is a multi-step query that needs planning
+            multi_step_plan = await self.analyze_for_multi_step_plan(user_message)
+            if multi_step_plan.get("requires_multi_step", False):
+                logger.info(f"Executing multi-step plan for: {user_message}")
+                response = await self.execute_multi_step_plan(multi_step_plan)
+                # Add assistant response to conversation history
+                self.conversation_history.append(
+                    {"role": "assistant", "content": response.get("message", "")}
+                )
+                return response
+
             # Analyze the message with Grok 3 to determine intent and extract parameters
             intent_analysis = await self.analyze_intent_with_grok(user_message)
 
@@ -3269,3 +3280,355 @@ To create an order, I need three pieces of information:
         except Exception as e:
             logger.error(f"Error analyzing most sold products: {e}")
             return {"success": False, "error": str(e), "data": []}
+
+    async def analyze_for_multi_step_plan(self, user_message: str) -> Dict[str, Any]:
+        """Analyze if the user message requires a multi-step plan"""
+        message_lower = user_message.lower()
+
+        # Patterns that indicate multi-step queries
+        multi_step_patterns = {
+            "customer_orders": {
+                "patterns": [
+                    "orders.*by.*customer",
+                    "orders.*for.*customer",
+                    "orders.*done by",
+                    "orders.*placed by",
+                    "orders.*from.*customer",
+                    "what.*orders.*customer",
+                    "show.*orders.*customer",
+                ],
+                "steps": [
+                    {"action": "find_customer", "description": "Find customer by name"},
+                    {
+                        "action": "get_customer_orders",
+                        "description": "Get orders for the customer",
+                    },
+                    {
+                        "action": "format_customer_orders",
+                        "description": "Display orders in user-friendly format",
+                    },
+                ],
+            },
+            "customer_spending": {
+                "patterns": [
+                    "how much.*spent",
+                    "spending.*customer",
+                    "total.*spent.*customer",
+                    "customer.*spending",
+                ],
+                "steps": [
+                    {"action": "find_customer", "description": "Find customer by name"},
+                    {
+                        "action": "get_customer_orders",
+                        "description": "Get orders for the customer",
+                    },
+                    {
+                        "action": "calculate_total_spending",
+                        "description": "Calculate total spending",
+                    },
+                ],
+            },
+            "best_customer_analysis": {
+                "patterns": [
+                    "best customer",
+                    "top customer",
+                    "biggest customer",
+                    "most valuable customer",
+                    "highest spending customer",
+                ],
+                "steps": [
+                    {"action": "get_all_customers", "description": "Get all customers"},
+                    {"action": "get_all_orders", "description": "Get all orders"},
+                    {
+                        "action": "analyze_customer_spending",
+                        "description": "Calculate spending per customer",
+                    },
+                    {
+                        "action": "rank_customers",
+                        "description": "Rank customers by spending",
+                    },
+                ],
+            },
+        }
+
+        # Check if message matches any multi-step pattern
+        for plan_type, config in multi_step_patterns.items():
+            for pattern in config["patterns"]:
+                import re
+
+                if re.search(pattern, message_lower):
+                    # Extract customer name if present
+                    customer_name = self._extract_customer_name_from_message(
+                        user_message
+                    )
+
+                    return {
+                        "requires_multi_step": True,
+                        "plan_type": plan_type,
+                        "steps": config["steps"],
+                        "customer_name": customer_name,
+                        "original_message": user_message,
+                    }
+
+        return {"requires_multi_step": False}
+
+    def _extract_customer_name_from_message(self, message: str) -> str:
+        """Extract customer name from message"""
+        import re
+
+        # Common patterns for customer names in queries
+        patterns = [
+            r"(?:by|for|from|of)\s+([A-Za-z\s]+?)(?:\s|$|\?)",
+            r"customer\s+([A-Za-z\s]+?)(?:\s|$|\?)",
+            r"orders.*?([A-Za-z]+\s+[A-Za-z]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                # Clean up common words that might be captured
+                stop_words = [
+                    "customer",
+                    "orders",
+                    "done",
+                    "placed",
+                    "by",
+                    "for",
+                    "from",
+                    "the",
+                    "a",
+                    "an",
+                ]
+                name_words = [
+                    word for word in name.split() if word.lower() not in stop_words
+                ]
+                if name_words and len(" ".join(name_words)) > 2:
+                    return " ".join(name_words)
+
+        return ""
+
+    async def execute_multi_step_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a multi-step plan"""
+        logger.info(f"Executing multi-step plan: {plan['plan_type']}")
+
+        plan_type = plan["plan_type"]
+        customer_name = plan.get("customer_name", "")
+
+        if plan_type == "customer_orders":
+            return await self._execute_customer_orders_plan(customer_name)
+        elif plan_type == "customer_spending":
+            return await self._execute_customer_spending_plan(customer_name)
+        elif plan_type == "best_customer_analysis":
+            return await self._execute_best_customer_analysis()
+
+        return {"type": "error", "message": "Unknown plan type"}
+
+    async def _execute_customer_orders_plan(self, customer_name: str) -> Dict[str, Any]:
+        """Execute plan to find customer orders"""
+        try:
+            # Step 1: Find customer by name
+            logger.info(f"Step 1: Finding customer '{customer_name}'")
+            customers_result = await self.ecommerce_agent.get_all_customers()
+
+            if not customers_result.get("success"):
+                return {"type": "error", "message": "Failed to retrieve customers"}
+
+            customers = customers_result.get("data", [])
+
+            # Find matching customer (case-insensitive)
+            matching_customer = None
+            customer_name_lower = customer_name.lower()
+
+            for customer in customers:
+                customer_full_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip().lower()
+                if (
+                    customer_name_lower in customer_full_name
+                    or customer_full_name in customer_name_lower
+                ):
+                    matching_customer = customer
+                    break
+
+            if not matching_customer:
+                return {
+                    "type": "chat_response",
+                    "message": f"❌ **Customer Not Found**\n\nI couldn't find a customer named '{customer_name}'. Please check the spelling or try using a different name format.",
+                    "action": "customer_not_found",
+                }
+
+            customer_id = matching_customer["id"]
+            customer_display_name = f"{matching_customer.get('first_name', '')} {matching_customer.get('last_name', '')}".strip()
+
+            logger.info(f"Step 2: Getting orders for customer {customer_id}")
+
+            # Step 2: Get all orders and filter by customer
+            orders_result = await self.ecommerce_agent.get_all_orders()
+
+            if not orders_result.get("success"):
+                return {"type": "error", "message": "Failed to retrieve orders"}
+
+            all_orders = orders_result.get("data", [])
+            customer_orders = [
+                order for order in all_orders if order.get("customer_id") == customer_id
+            ]
+
+            # Step 3: Format the results
+            if not customer_orders:
+                return {
+                    "type": "chat_response",
+                    "message": f"📋 **No Orders Found**\n\n{customer_display_name} hasn't placed any orders yet.",
+                    "action": "customer_orders_empty",
+                }
+
+            # Format orders nicely
+            message = f"📋 **Orders for {customer_display_name}**\n\n"
+            total_value = 0
+
+            for i, order in enumerate(customer_orders, 1):
+                order_date = (
+                    order.get("created_at", "").split("T")[0]
+                    if order.get("created_at")
+                    else "Unknown date"
+                )
+                order_total = order.get("total_amount", 0)
+                currency = order.get("currency", "USD")
+                status = order.get("status", "Unknown")
+
+                message += f"**Order #{i}** (ID: {order.get('id', 'N/A')})\n"
+                message += f"📅 Date: {order_date}\n"
+                message += f"💰 Total: {currency} ${order_total:.2f}\n"
+                message += f"📊 Status: {status}\n"
+
+                # Show order items if available
+                items = order.get("items", [])
+                if items:
+                    message += f"📦 Items:\n"
+                    for item in items:
+                        quantity = item.get("quantity", 1)
+                        product_name = item.get("product_name", "Unknown Product")
+                        message += f"   • {quantity}x {product_name}\n"
+
+                total_value += order_total
+                message += "\n"
+
+            message += f"💵 **Total Lifetime Value**: {currency} ${total_value:.2f}"
+
+            return {
+                "type": "chat_response",
+                "message": message,
+                "action": "customer_orders_found",
+                "data": {
+                    "customer": matching_customer,
+                    "orders": customer_orders,
+                    "total_value": total_value,
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"Error in customer orders plan: {e}")
+            return {
+                "type": "error",
+                "message": f"An error occurred while finding orders: {str(e)}",
+            }
+
+    async def _execute_best_customer_analysis(self) -> Dict[str, Any]:
+        """Execute plan to analyze best customers"""
+        try:
+            logger.info("Executing best customer analysis plan")
+
+            # Step 1: Get all customers
+            customers_result = await self.ecommerce_agent.get_all_customers()
+            if not customers_result.get("success"):
+                return {"type": "error", "message": "Failed to retrieve customers"}
+
+            customers = customers_result.get("data", [])
+
+            # Step 2: Get all orders
+            orders_result = await self.ecommerce_agent.get_all_orders()
+            if not orders_result.get("success"):
+                return {"type": "error", "message": "Failed to retrieve orders"}
+
+            orders = orders_result.get("data", [])
+
+            # Step 3: Calculate spending per customer
+            customer_spending = {}
+
+            for order in orders:
+                customer_id = order.get("customer_id")
+                total_amount = order.get("total_amount", 0)
+
+                if customer_id:
+                    if customer_id not in customer_spending:
+                        customer_spending[customer_id] = {
+                            "total_spent": 0,
+                            "order_count": 0,
+                            "orders": [],
+                        }
+
+                    customer_spending[customer_id]["total_spent"] += total_amount
+                    customer_spending[customer_id]["order_count"] += 1
+                    customer_spending[customer_id]["orders"].append(order)
+
+            # Step 4: Rank customers and format results
+            if not customer_spending:
+                return {
+                    "type": "chat_response",
+                    "message": "📊 **No Order Data Available**\n\nThere are no orders in the system yet to analyze customer spending.",
+                    "action": "no_orders_for_analysis",
+                }
+
+            # Sort by total spent
+            sorted_customers = sorted(
+                customer_spending.items(),
+                key=lambda x: x[1]["total_spent"],
+                reverse=True,
+            )
+
+            # Get customer details
+            customer_map = {c["id"]: c for c in customers}
+
+            message = "👑 **Best Customers Analysis**\n\n"
+
+            for i, (customer_id, spending_data) in enumerate(sorted_customers[:5], 1):
+                customer = customer_map.get(customer_id)
+                if not customer:
+                    continue
+
+                customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+                email = customer.get("email", "No email")
+                total_spent = spending_data["total_spent"]
+                order_count = spending_data["order_count"]
+                avg_order = total_spent / order_count if order_count > 0 else 0
+
+                crown = "👑" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🏅"
+
+                message += f"{crown} **#{i}. {customer_name}**\n"
+                message += f"📧 {email}\n"
+                message += f"💰 Total Spent: ${total_spent:.2f}\n"
+                message += f"📦 Orders: {order_count}\n"
+                message += f"📊 Avg Order: ${avg_order:.2f}\n\n"
+
+            # Show the top customer details
+            if sorted_customers:
+                top_customer_id, top_spending = sorted_customers[0]
+                top_customer = customer_map.get(top_customer_id)
+                if top_customer:
+                    top_name = f"{top_customer.get('first_name', '')} {top_customer.get('last_name', '')}".strip()
+                    message += f"🎯 **Best Customer**: {top_name} with ${top_spending['total_spent']:.2f} in {top_spending['order_count']} orders!"
+
+            return {
+                "type": "chat_response",
+                "message": message,
+                "action": "best_customer_analysis",
+                "data": {
+                    "ranked_customers": sorted_customers,
+                    "customer_details": customer_map,
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"Error in best customer analysis: {e}")
+            return {
+                "type": "error",
+                "message": f"An error occurred during analysis: {str(e)}",
+            }

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Element ID Test</title>
+</head>
+<body>
+    <h1>Element ID Validation Test</h1>
+    <div id="results"></div>
+    
+    <script>
+        const requiredIds = [
+            'messageInput',
+            'sendButton', 
+            'connectionStatus',
+            'chatMessages'
+        ];
+        
+        const results = document.getElementById('results');
+        let allFound = true;
+        
+        requiredIds.forEach(id => {
+            const element = document.getElementById(id);
+            const status = element ? '✅ Found' : '❌ Missing';
+            const color = element ? 'green' : 'red';
+            
+            results.innerHTML += `<div style="color: ${color}">${id}: ${status}</div>`;
+            
+            if (!element) allFound = false;
+        });
+        
+        results.innerHTML += `<br><strong style="color: ${allFound ? 'green' : 'red'}">Overall: ${allFound ? 'All IDs found!' : 'Some IDs missing!'}</strong>`;
+        
+        // Test quick buttons
+        const quickButtons = document.querySelectorAll('.quick-button');
+        results.innerHTML += `<br><div>Quick buttons found: ${quickButtons.length}</div>`;
+        
+        // If we're on the main page, test the chatbot
+        if (window.chatbot) {
+            results.innerHTML += `<br><div style="color: green">✅ Chatbot instance found</div>`;
+            results.innerHTML += `<br><div>Connected: ${window.chatbot.isConnected}</div>`;
+        } else {
+            results.innerHTML += `<br><div style="color: orange">⚠️ Chatbot instance not found (normal for test page)</div>`;
+        }
+    </script>
+</body>
+</html>

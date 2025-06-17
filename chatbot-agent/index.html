@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Grok AI E-commerce Assistant</title>
+    <title>Smart E-commerce Agent</title>
     <style>
         * {
             margin: 0;
@@ -335,19 +335,19 @@
 <body>
     <div class="chat-container">
         <div class="chat-header">
-            <h1>Grok AI E-commerce Assistant</h1>
-            <p>Powered by Grok 3 - Ask me anything about your store!</p>
-            <div class="grok-badge">🚀 AI-Powered</div>
+            <h1>Smart E-commerce Agent</h1>
+            <p>Powered by Intelligent Planning - Ask me anything about your store!</p>
+            <div class="grok-badge">🧠 Smart AI</div>
         </div>
         
         <div id="connectionStatus" class="connection-status disconnected">
-            Connecting to Grok AI agent...
+            Connecting to Smart Agent...
         </div>
 
         <div class="chat-messages" id="chatMessages">
             <div class="message bot">
                 <div class="message-content">
-                    Hello! I'm your AI-powered e-commerce assistant, enhanced with Grok 3. I can help you:
+                    Hello! I'm your AI-powered e-commerce assistant with smart planning capabilities. I can help you:
                     <br><br>
                     • 🛍️ <strong>Manage products</strong> - Create, search, and update your inventory
                     <br>• 👥 <strong>Handle customers</strong> - View and manage customer information  
@@ -362,7 +362,7 @@
 
         <div class="typing-indicator" id="typingIndicator">
             <div class="typing-content">
-                <div class="ai-thinking">Grok is thinking...</div>
+                <div class="ai-thinking">Smart Agent is thinking...</div>
                 <div class="typing-dots">
                     <div class="typing-dot"></div>
                     <div class="typing-dot"></div>
@@ -374,22 +374,22 @@
         <div class="quick-actions">
             <div class="quick-actions-title">💡 Quick Actions:</div>
             <div class="quick-buttons">
-                <div class="quick-button" onclick="sendQuickMessage('Show me all products')">📦 All Products</div>
-                <div class="quick-button" onclick="sendQuickMessage('List all customers')">👥 All Customers</div>
-                <div class="quick-button" onclick="sendQuickMessage('Show me recent orders')">📋 Recent Orders</div>
-                <div class="quick-button" onclick="sendQuickMessage('What products are low in stock?')">⚠️ Low Stock</div>
-                <div class="quick-button" onclick="sendQuickMessage('Help me create a new product')">➕ New Product</div>
+                <div class="quick-button" data-message="Show me all products">📦 All Products</div>
+                <div class="quick-button" data-message="List all customers">👥 All Customers</div>
+                <div class="quick-button" data-message="Show me recent orders">📋 Recent Orders</div>
+                <div class="quick-button" data-message="What products are low in stock?">⚠️ Low Stock</div>
+                <div class="quick-button" data-message="Help me create a new product">➕ New Product</div>
             </div>
         </div>
 
         <div class="chat-input">
             <div class="input-container">
-                <textarea id="messageInput" placeholder="Ask me anything about your e-commerce store..." onkeypress="handleKeyPress(event)" rows="1"></textarea>
-                <button id="sendButton" onclick="sendMessage()">Send</button>
+                <textarea id="messageInput" placeholder="Ask me anything about your e-commerce store..." rows="1"></textarea>
+                <button id="sendButton">Send</button>
             </div>
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <script src="app_smart.js"></script>
 </body>
 </html>
