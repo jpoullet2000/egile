@@ -78,9 +78,14 @@ class GrokEcommerceAgent:
                     "request_product_details",
                     "help_find_customer",
                     "help_choose_customer_contact",
+                    "help_create_customer",
                     "help_create_order",
                 ]
-                if action in interactive_actions:
+
+                # Also check if the result indicates it requires followup (like missing email for customer creation)
+                if action in interactive_actions or action_result.get(
+                    "requires_followup", False
+                ):
                     # Add assistant response to conversation history
                     self.conversation_history.append(
                         {
@@ -167,6 +172,21 @@ For example:
 - "who are my customers?" = list_customers
 - "best customer" = list_customers (will analyze orders to find top customers)
 - "top customers" = list_customers (will analyze spending patterns)
+- "create a new customer John Doe" = create_customer with first_name: "John", last_name: "Doe" (but needs email)
+- "add customer Jane Smith with email jane@example.com" = create_customer with email: "jane@example.com", first_name: "Jane", last_name: "Smith"
+- "create customer john.doe@email.com John Doe" = create_customer with email: "john.doe@email.com", first_name: "John", last_name: "Doe"
+
+IMPORTANT: Help vs Action distinction:
+- "how to create a customer" = help_create_customer (provide guidance) - NOT create_customer
+- "help me create a customer" = help_create_customer (provide guidance) - NOT create_customer  
+- "how do I add a customer" = help_create_customer (provide guidance) - NOT create_customer
+- "customer creation help" = help_create_customer (provide guidance) - NOT create_customer
+- "help with customer creation" = help_create_customer (provide guidance) - NOT create_customer
+- "I'd like to create a customer" = help_create_customer (provide guidance) - NOT create_customer
+- "I want to create a customer" = help_create_customer (provide guidance) - NOT create_customer
+- "create a new customer" (without details) = help_create_customer (provide guidance) - NOT create_customer
+
+If user asks HOW TO, HELP WITH, or wants to create but provides NO DETAILS, use help_* actions, NOT the actual action!
 - "show me orders" = list_orders
 - "what's running low?" = get_low_stock_products
 - "help me create a product" = create_product (if details provided) or help_create_product (if no details)
@@ -179,7 +199,8 @@ Available operations:
 - get_product: Get product details (needs: search_term for product name, or product_id, or sku)
 - search_products: Search products (needs: query, optional: min_price, max_price, category, in_stock_only)
 - list_customers: Show all customers
-- create_customer: Create customer (needs: email, first_name, last_name, optional: phone)
+- create_customer: Create customer (needs: email, first_name, last_name, optional: phone) - if email missing, prompt for it or generate placeholder
+- help_create_customer: Provide step-by-step guidance for creating customers (when user asks for help)
 - get_customer: Get customer details (needs: identifier and search_by: "id"|"email")
 - list_orders: Show all orders
 - create_order: Create order (needs: customer_id, items: [{product_id, quantity}], currency)
@@ -681,50 +702,6 @@ Respond with JSON format:
                 "confidence": 0.9,
             }
 
-        # Customer creation patterns
-        customer_creation_patterns = [
-            "create customer",
-            "add customer",
-            "new customer",
-            "add new customer",
-            "create a customer",
-            "add a customer",
-            "create a new customer",
-            "i want to create a customer",
-            "i want to add a customer",
-            "help me create a customer",
-            "register customer",
-            "sign up customer",
-            "customer registration",
-        ]
-
-        if any(pattern in message_lower for pattern in customer_creation_patterns):
-            # Extract customer information from the message
-            params = self.extract_customer_params(message)
-            
-            # Check if we have all required fields (email, first_name, last_name)
-            required_fields = ["email", "first_name", "last_name"]
-            missing_fields = [field for field in required_fields if not params.get(field)]
-            
-            if missing_fields:
-                # Return a helper response asking for missing information
-                return {
-                    "intent": f"Request missing customer information: {', '.join(missing_fields)}",
-                    "action": "help_create_customer",
-                    "parameters": {"provided_params": params, "missing_fields": missing_fields},
-                    "requires_action": True,
-                    "confidence": 0.9,
-                }
-            else:
-                # All required fields provided, proceed with customer creation
-                return {
-                    "intent": "Create a new customer",
-                    "action": "create_customer",
-                    "parameters": params,
-                    "requires_action": True,
-                    "confidence": 0.9,
-                }
-
         # Create product patterns
         create_product_patterns = [
             "create product",
@@ -957,6 +934,110 @@ Respond with JSON format:
                     "confidence": 0.9,
                 }
 
+        # Customer creation patterns
+        customer_creation_patterns = [
+            "create customer",
+            "add customer",
+            "new customer",
+            "create a customer",
+            "add a customer",
+            "create a new customer",
+            "add new customer",
+            "register customer",
+            "sign up customer",
+        ]
+
+        if any(pattern in message_lower for pattern in customer_creation_patterns):
+            import re
+
+            # Extract customer details from the message
+            params = {}
+
+            # Try to extract email first
+            email_match = re.search(
+                r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", message
+            )
+            if email_match:
+                params["email"] = email_match.group(0)
+
+            # Extract names - look for patterns like "John Doe", "Jane Smith"
+            # Remove the action words to focus on the name part
+            name_part = message_lower
+            for pattern in customer_creation_patterns:
+                name_part = name_part.replace(pattern, "").strip()
+
+            # Remove email from name part if found
+            if email_match:
+                name_part = name_part.replace(email_match.group(0), "").strip()
+
+            # Remove common words
+            name_part = re.sub(
+                r"\b(with|email|for|named|called)\b", "", name_part
+            ).strip()
+
+            # Extract first and last name
+            name_words = [word for word in name_part.split() if word and len(word) > 1]
+            if len(name_words) >= 1:
+                params["first_name"] = name_words[0].title()
+                if len(name_words) >= 2:
+                    params["last_name"] = " ".join(name_words[1:]).title()
+                else:
+                    # If only one name provided, use it as first name
+                    params["last_name"] = ""
+
+            # If no email found, we'll need to handle this in the processing
+            if "email" not in params or not params.get("email"):
+                params["email"] = ""  # Mark as missing
+
+            # If missing critical information, route to help instead
+            if not params.get("email") or not params.get("first_name"):
+                return {
+                    "intent": "Request help creating customer due to missing information",
+                    "action": "help_create_customer",
+                    "parameters": {},
+                    "requires_action": True,
+                    "confidence": 0.8,
+                }
+
+            return {
+                "intent": f"Create new customer: {params.get('first_name', '')} {params.get('last_name', '')}",
+                "action": "create_customer",
+                "parameters": params,
+                "requires_action": True,
+                "confidence": 0.9
+                if params.get("email")
+                else 0.7,  # Lower confidence if missing email
+            }
+
+        # Customer creation help patterns
+        customer_help_patterns = [
+            "how to create a customer",
+            "how do I create a customer",
+            "help me create a customer",
+            "how to add a customer",
+            "how do I add a customer",
+            "help me add a customer",
+            "customer creation help",
+            "how to create customer",
+            "how do I make a customer",
+            "help with customer creation",
+            "i'd like to create a customer",
+            "i want to create a customer",
+            "i'd like to add a customer",
+            "i want to add a customer",
+            "create a new customer",
+            "add a new customer",
+        ]
+
+        if any(pattern in message_lower for pattern in customer_help_patterns):
+            return {
+                "intent": "Request help with customer creation process",
+                "action": "help_create_customer",
+                "parameters": {},
+                "requires_action": True,
+                "confidence": 0.9,
+            }
+
         # Search products
         if "search" in message_lower and any(
             word in message_lower for word in ["product", "item", "for"]
@@ -1095,53 +1176,6 @@ Respond with JSON format:
 
         return {}
 
-    def extract_customer_params(self, message: str) -> Dict[str, Any]:
-        """Extract customer parameters from message"""
-        import re
-
-        params = {}
-
-        # Try to extract email (most reliable identifier)
-        email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message)
-        if email_match:
-            params["email"] = email_match.group()
-
-        # Try to extract names from various patterns
-        # Pattern 1: "create customer John Doe" (first and last name)
-        name_after_customer = re.search(r'(?:customer|add|create)\s+(?:a\s+)?(?:new\s+)?(?:customer\s+)?([A-Z][a-zA-Z]*)\s+([A-Z][a-zA-Z]*)', message, re.IGNORECASE)
-        if name_after_customer:
-            params["first_name"] = name_after_customer.group(1)
-            params["last_name"] = name_after_customer.group(2)
-
-        # Pattern 2: "John Doe" in quotes
-        quoted_name = re.search(r'["\']([A-Z][a-zA-Z]*)\s+([A-Z][a-zA-Z]*)["\']', message)
-        if quoted_name and not params.get("first_name"):
-            params["first_name"] = quoted_name.group(1)
-            params["last_name"] = quoted_name.group(2)
-
-        # Pattern 3: Structured format like "first_name: John, last_name: Doe, email: john@example.com"
-        first_name_match = re.search(r'first[_\s]?name[:\s]+([A-Za-z]+)', message, re.IGNORECASE)
-        if first_name_match:
-            params["first_name"] = first_name_match.group(1)
-
-        last_name_match = re.search(r'last[_\s]?name[:\s]+([A-Za-z]+)', message, re.IGNORECASE)
-        if last_name_match:
-            params["last_name"] = last_name_match.group(1)
-
-        email_structured = re.search(r'email[:\s]+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})', message, re.IGNORECASE)
-        if email_structured:
-            params["email"] = email_structured.group(1)
-
-        # Try to extract phone number (optional)
-        phone_match = re.search(r'phone[:\s]*([+]?[\d\s\-\(\)]{10,})', message, re.IGNORECASE)
-        if phone_match:
-            # Clean up the phone number
-            phone = re.sub(r'[^\d+]', '', phone_match.group(1))
-            if len(phone) >= 10:  # Minimum valid phone length
-                params["phone"] = phone_match.group(1).strip()
-
-        return params
-
     async def help_create_product(self) -> Dict[str, Any]:
         """Start interactive product creation flow"""
         # Initialize product creation state
@@ -1170,6 +1204,40 @@ What would you like to name your product?
 For example: "iPhone 15 Pro" or "Wireless Gaming Mouse"
 
 💡 *Tip: Choose a clear, descriptive name that customers will easily understand.*""",
+        }
+
+    async def help_create_customer(self) -> Dict[str, Any]:
+        """Provide step-by-step guidance for creating a customer"""
+        return {
+            "type": "chat_response",
+            "action": "help_create_customer",
+            "success": True,
+            "message": """🙋‍♀️ I'll help you create a new customer! Here's what you need to know:
+
+**Required Information:**
+• **Email** - The customer's email address (must be unique)
+• **Name** - The customer's full name
+
+**Optional Information:**
+• **Phone** - Customer's phone number
+• **Address** - Customer's address
+
+**How to create a customer:**
+
+**Option 1 - Complete command:**
+`create customer John Smith with email john.smith@email.com`
+`add customer Jane Doe email jane@example.com phone 555-1234`
+
+**Option 2 - Step by step:**
+Just tell me the customer's name and email, and I'll create them for you:
+`Customer: John Smith, Email: john@email.com`
+
+**Examples:**
+• "Create customer Sarah Wilson with email sarah.wilson@gmail.com"
+• "Add customer Mike Johnson email mike.j@company.com phone 555-0123"
+• "New customer: Alice Brown, alice.brown@email.com, 123 Main St"
+
+Would you like me to help you create a customer now? Just provide the name and email address!""",
         }
 
     async def request_product_details(
@@ -1530,6 +1598,7 @@ Want to create another product? Just say "create a new product" or "help me crea
             "search_products": "search_products",
             "list_customers": "get_all_customers",
             "create_customer": "create_customer",
+            "help_create_customer": "help_create_customer",
             "get_customer": "get_customer",
             "help_find_customer": "help_find_customer",
             "help_choose_customer_contact": "help_choose_customer_contact",
@@ -1544,10 +1613,16 @@ Want to create another product? Just say "create a new product" or "help me crea
         if action not in action_mapping and action not in [
             "analyze_best_customers",
             "analyze_most_sold_products",
+            "help_create_customer",
+            "help_create_product",
+            "request_product_details",
+            "help_find_customer",
+            "help_choose_customer_contact",
+            "help_create_order",
         ]:
             raise Exception(f"Unknown action: {action}")
 
-        # Handle special cases
+        # Handle special cases for actions that need direct returns
         if action == "help_create_product":
             return await self.help_create_product()
         elif action == "request_product_details":
@@ -1556,6 +1631,8 @@ Want to create another product? Just say "create a new product" or "help me crea
             return await self.help_find_customer(parameters)
         elif action == "help_choose_customer_contact":
             return await self.help_choose_customer_contact()
+        elif action == "help_create_customer":
+            return await self.help_create_customer()
         elif action == "help_create_order":
             return await self.help_create_order()
         elif action == "analyze_best_customers":
@@ -1756,6 +1833,23 @@ Want to create another product? Just say "create a new product" or "help me crea
         method_name = action_mapping[action]
         method = getattr(self.ecommerce_agent, method_name)
 
+        # Special handling for create_customer with missing parameters - redirect to help
+        if action == "create_customer":
+            # Check if critical parameters are missing
+            email = parameters.get("email", "").strip()
+            first_name = parameters.get("first_name", "").strip()
+
+            logger.info(
+                f"DEBUG: create_customer check - email: '{email}', first_name: '{first_name}', parameters: {parameters}"
+            )
+
+            if not email or not first_name:
+                # Missing critical info - redirect to help instead of throwing error
+                logger.info(
+                    "Redirecting create_customer to help_create_customer due to missing parameters"
+                )
+                return await self.help_create_customer()
+
         # Handle special cases for actions that don't support certain parameters
         if action == "list_products" and parameters:
             # get_all_products doesn't accept parameters, but we might want to sort later
@@ -1811,6 +1905,9 @@ Want to create another product? Just say "create a new product" or "help me crea
             sort_info = None
         else:
             sort_info = None
+
+        # Debug: Check action and parameters before execution
+        logger.info(f"About to execute - action: '{action}', parameters: {parameters}")
 
         # Execute the method
         if parameters:
@@ -2976,6 +3073,53 @@ To create an order, I need three pieces of information:
                         + (substring_score * 0.4)
                         + (similarity_score * 0.2)
                     )
+
+                    if (
+                        total_score > best_score and total_score > 0.6
+                    ):  # Minimum threshold
+                        best_match = product_id
+                        best_score = total_score
+
+            if best_match:
+                # Get the matched product name for logging
+                matched_product = next(
+                    (p for p in products if p.get("id") == best_match), {}
+                )
+                matched_name = matched_product.get("name", "unknown")
+                logger.info(
+                    f"Dynamic mapping: '{search_term}' → '{best_match}' (matched '{matched_name.lower()}', score: {best_score:.2f})"
+                )
+                return best_match
+            else:
+                logger.info(
+                    f"No suitable match found for '{search_term}' (best score: {best_score:.2f})"
+                )
+                return None
+
+        except Exception as e:
+            logger.error(f"Error in dynamic product mapping for '{search_term}': {e}")
+            return None
+
+    async def _get_product_name_by_id(self, product_id: str) -> str:
+        """Get product name from MCP server by product ID"""
+        try:
+            # Use MCP server's get_product method
+            result = await self.ecommerce_agent.get_product(
+                identifier=product_id, search_by="id"
+            )
+
+            if result.success and result.data:
+                if isinstance(result.data, list) and len(result.data) > 0:
+                    product = result.data[0]
+                elif isinstance(result.data, dict):
+                    product = result.data
+                else:
+                    logger.warning(
+                        f"Unexpected product data format for {product_id}: {result.data}"
+                    )
+                    return "Unknown Product"
+
+                return product.get("name", "Unknown Product")
             else:
                 logger.warning(f"Product not found: {product_id}")
                 return "Unknown Product"
