@@ -3,36 +3,83 @@ class GrokChatbot {
         this.ws = null;
         this.isConnected = false;
         this.messageQueue = [];
+        this.connectionAttempts = 0;
+        this.maxConnectionAttempts = 3;
+        this.isConnecting = false;
+        this.pingInterval = null;
         this.init();
     }
 
     init() {
+        // Only initialize once
+        if (this.initialized) {
+            console.log('⚠️ Chatbot already initialized, skipping...');
+            return;
+        }
+        this.initialized = true;
+        
         this.connectToServer();
         this.setupEventListeners();
         this.setupTextareaAutoResize();
     }
 
     connectToServer() {
-        // Try multiple ports for Smart Agent bridge
-        const ports = [8770, 8769, 8771, 8772];
-        this.tryConnectToPorts(ports, 0);
+        // Prevent multiple simultaneous connection attempts
+        if (this.isConnecting || (this.ws && this.ws.readyState === WebSocket.CONNECTING)) {
+            console.log('⚠️ Connection attempt already in progress...');
+            return;
+        }
+        
+        this.isConnecting = true;
+        
+        // Close any existing connection first
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+        
+        // Try connecting to possible Smart Agent bridge ports
+        const possiblePorts = [8770, 8771, 8772, 8773, 8774];
+        this.tryConnectToPorts(possiblePorts, 0);
     }
 
     tryConnectToPorts(ports, index) {
         if (index >= ports.length) {
-            this.addMessage('system', '❌ Could not connect to Smart Agent on any available port.');
+            console.error('❌ Failed to connect to Smart Agent on any port');
+            this.isConnecting = false;
+            this.updateConnectionStatus(false);
+            this.addMessage('system', '❌ Could not connect to Smart Agent on any port. Please ensure the server is running.');
             return;
         }
-
+        
         const port = ports[index];
+        console.log(`Trying to connect to port ${port}...`);
+        this.connectToPort(port, () => {
+            // On failure, try next port after a short delay
+            console.log(`Port ${port} failed, trying next port...`);
+            setTimeout(() => {
+                this.tryConnectToPorts(ports, index + 1);
+            }, 1000);
+        });
+    }
+
+    connectToPort(port, onFailure = null) {
         try {
-            // Connect to the WebSocket bridge (Smart Agent)
+            console.log(`Attempting to connect to Smart Agent on port ${port}...`);
             this.ws = new WebSocket(`ws://localhost:${port}`);
             
+            let connectionSuccessful = false;
+            
             this.ws.onopen = () => {
+                connectionSuccessful = true;
                 this.isConnected = true;
+                this.isConnecting = false;
+                this.connectionAttempts = 0;
                 this.updateConnectionStatus(true);
                 console.log(`✅ Connected to Smart Agent on port ${port}`);
+                
+                // Send a ping to keep connection alive
+                this.startPingInterval();
                 
                 // Process any queued messages
                 while (this.messageQueue.length > 0) {
@@ -46,34 +93,57 @@ class GrokChatbot {
                 this.handleServerResponse(response);
             };
 
-            this.ws.onclose = () => {
+            this.ws.onclose = (event) => {
                 this.isConnected = false;
+                this.isConnecting = false;
                 this.updateConnectionStatus(false);
+                this.stopPingInterval();
+                console.log(`Connection closed on port ${port}. Code: ${event.code}, Reason: ${event.reason}`);
                 
-                // Try next port
-                if (index < ports.length - 1) {
-                    console.log(`Port ${port} closed, trying next port...`);
-                    setTimeout(() => this.tryConnectToPorts(ports, index + 1), 1000);
-                } else {
-                    this.addMessage('system', '⚠️ Connection lost. Attempting to reconnect...');
+                // If connection was never successful and we have a failure callback, use it
+                if (!connectionSuccessful && onFailure) {
+                    onFailure();
+                    return;
+                }
+                
+                // Only attempt reconnection if it wasn't a manual close and we haven't exceeded max attempts
+                if (event.code !== 1000 && event.code !== 1001 && this.connectionAttempts < this.maxConnectionAttempts) {
+                    this.connectionAttempts++;
+                    console.log(`Connection lost. Attempting to reconnect (${this.connectionAttempts}/${this.maxConnectionAttempts})...`);
+                    this.addMessage('system', `⚠️ Connection lost. Reconnecting... (${this.connectionAttempts}/${this.maxConnectionAttempts})`);
                     setTimeout(() => this.connectToServer(), 3000);
+                } else if (this.connectionAttempts >= this.maxConnectionAttempts) {
+                    this.addMessage('system', '❌ Could not connect to Smart Agent after multiple attempts. Please refresh the page.');
                 }
             };
 
             this.ws.onerror = (error) => {
                 console.error(`WebSocket error on port ${port}:`, error);
-                // Try next port
-                if (index < ports.length - 1) {
-                    setTimeout(() => this.tryConnectToPorts(ports, index + 1), 500);
+                this.isConnecting = false;
+                
+                // If we have a failure callback for port discovery, use it
+                if (onFailure && !connectionSuccessful) {
+                    onFailure();
+                    return;
+                }
+                
+                // Otherwise use the normal retry logic
+                if (this.connectionAttempts < this.maxConnectionAttempts) {
+                    this.connectionAttempts++;
+                    console.log(`Connection error. Retrying (${this.connectionAttempts}/${this.maxConnectionAttempts})...`);
+                    setTimeout(() => this.connectToServer(), 2000);
                 } else {
-                    this.addMessage('system', '❌ Connection error. Please ensure the Smart Agent server is running.');
+                    this.addMessage('system', '❌ Connection error. Please ensure the Smart Agent server is running and refresh the page.');
                 }
             };
 
         } catch (error) {
             console.error(`Failed to connect to port ${port}:`, error);
-            if (index < ports.length - 1) {
-                this.tryConnectToPorts(ports, index + 1);
+            this.isConnecting = false;
+            if (onFailure) {
+                onFailure();
+            } else {
+                this.addMessage('system', '❌ Failed to establish connection. Please refresh the page.');
             }
         }
     }
@@ -141,6 +211,29 @@ class GrokChatbot {
         } else {
             statusElement.className = 'connection-status disconnected';
             statusElement.textContent = 'Disconnected';
+        }
+    }
+
+    startPingInterval() {
+        // Send ping every 30 seconds to keep connection alive
+        this.pingInterval = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try {
+                    this.ws.send(JSON.stringify({ type: 'ping' }));
+                } catch (error) {
+                    console.error('Error sending ping:', error);
+                    this.stopPingInterval();
+                }
+            } else {
+                this.stopPingInterval();
+            }
+        }, 30000);
+    }
+
+    stopPingInterval() {
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
         }
     }
 
@@ -248,14 +341,31 @@ class GrokChatbot {
 // Initialize the chatbot when the page loads
 document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 Initializing Smart Chatbot...');
+    
+    // Prevent multiple instances
+    if (window.chatbot) {
+        console.log('⚠️ Chatbot already exists, skipping initialization');
+        return;
+    }
+    
     window.chatbot = new GrokChatbot();
     
     // Show initial welcome message after a short delay
     setTimeout(() => {
         console.log('📝 Adding welcome message...');
-        window.chatbot.addMessage('system', 'Welcome to the Smart E-commerce Agent! 🧠');
+        if (window.chatbot) {
+            window.chatbot.addMessage('system', 'Welcome to the Smart E-commerce Agent! 🧠');
+        }
     }, 500);
     
     // Add some debugging
     console.log('✅ Chatbot initialized and available as window.chatbot');
+});
+
+// Handle page unload to clean up connections
+window.addEventListener('beforeunload', () => {
+    if (window.chatbot && window.chatbot.ws) {
+        console.log('🔌 Closing WebSocket connection before page unload');
+        window.chatbot.ws.close(1000, 'Page unloading');
+    }
 });

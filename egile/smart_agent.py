@@ -489,13 +489,20 @@ class SmartAgent:
 
                                 orders = json.loads(orders_text)
 
+                            # Enhance orders with customer information
+                            enhanced_orders = (
+                                await self._enhance_orders_with_customer_info(
+                                    orders[:10]
+                                )
+                            )
+
                             # Format the orders nicely
-                            formatted_orders = self._format_orders(orders[:10])
+                            formatted_orders = self._format_orders(enhanced_orders)
 
                             return {
                                 "success": True,
                                 "message": f"Found {len(orders)} orders. Here are the first 10:\n\n{formatted_orders}",
-                                "data": orders[:10],
+                                "data": enhanced_orders,
                                 "type": "order_list",
                             }
                         else:
@@ -533,13 +540,65 @@ class SmartAgent:
                 if result.success:
                     import json
 
-                    products = json.loads(result.data[0]["text"])
-                    return {
-                        "success": True,
-                        "message": f"Found {len(products)} products matching '{query}'.",
-                        "data": products,
-                        "type": "search_results",
-                    }
+                    try:
+                        if result.data and len(result.data) > 0:
+                            # Check if result.data is already a list of products
+                            if isinstance(result.data, list) and isinstance(
+                                result.data[0], dict
+                            ):
+                                # Data is already parsed
+                                products = result.data
+                            else:
+                                # Handle text content structure
+                                if hasattr(result.data[0], "text"):
+                                    products_text = result.data[0].text
+                                elif (
+                                    isinstance(result.data[0], dict)
+                                    and "text" in result.data[0]
+                                ):
+                                    products_text = result.data[0]["text"]
+                                else:
+                                    products_text = str(result.data[0])
+
+                                products = json.loads(products_text)
+
+                            # Format the search results
+                            if products:
+                                formatted_products = self._format_products(
+                                    products[:10]
+                                )
+                                return {
+                                    "success": True,
+                                    "message": f"Found {len(products)} products matching '{query}':\n\n{formatted_products}",
+                                    "data": products[:10],
+                                    "type": "search_results",
+                                }
+                            else:
+                                return {
+                                    "success": True,
+                                    "message": f"No products found matching '{query}'.",
+                                    "data": [],
+                                    "type": "search_results",
+                                }
+                        else:
+                            return {
+                                "success": True,
+                                "message": f"No products found matching '{query}'.",
+                                "data": [],
+                                "type": "search_results",
+                            }
+                    except (
+                        json.JSONDecodeError,
+                        KeyError,
+                        AttributeError,
+                        IndexError,
+                    ) as e:
+                        logger.error(f"Error parsing search results: {e}")
+                        return {
+                            "success": False,
+                            "message": f"Error processing search results: {str(e)}",
+                            "type": "error",
+                        }
                 else:
                     return {
                         "success": False,
@@ -1760,7 +1819,17 @@ Just tell me what you'd like to accomplish in natural language!
 
         formatted = ""
         for i, customer in enumerate(customers, 1):
-            name = customer.get("name", "Unknown Customer")
+            # Handle both possible name formats
+            if "name" in customer:
+                name = customer.get("name", "Unknown Customer")
+            else:
+                first_name = customer.get("first_name", "")
+                last_name = customer.get("last_name", "")
+                if first_name or last_name:
+                    name = f"{first_name} {last_name}".strip()
+                else:
+                    name = "Unknown Customer"
+
             email = customer.get("email", "No email")
             total_orders = customer.get("total_orders", 0)
             created_at = customer.get("created_at", "")
@@ -1792,7 +1861,15 @@ Just tell me what you'd like to accomplish in natural language!
         formatted = ""
         for i, order in enumerate(orders, 1):
             order_id = order.get("id", "Unknown ID")
-            customer_name = order.get("customer_name", "Unknown Customer")
+
+            # Handle customer name - try multiple approaches
+            customer_name = order.get("customer_name")
+            if not customer_name:
+                customer_id = order.get("customer_id", "")
+                customer_name = (
+                    f"Customer {customer_id}" if customer_id else "Unknown Customer"
+                )
+
             total = order.get("total_amount", 0)
             currency = order.get("currency", "USD")
             status = order.get("status", "Unknown")
@@ -2073,6 +2150,58 @@ Just tell me what you'd like to accomplish in natural language!
             formatted.append(f"Address: {parsed_info['address']}")
 
         return ", ".join(formatted) if formatted else "no valid information"
+
+    async def _enhance_orders_with_customer_info(self, orders: list) -> list:
+        """Enhance order data with customer name information."""
+        enhanced_orders = []
+
+        for order in orders:
+            enhanced_order = order.copy()
+            customer_id = order.get("customer_id")
+
+            if customer_id and not order.get("customer_name"):
+                try:
+                    # Try to get customer information
+                    customer_result = await self.ecommerce_agent.get_customer(
+                        customer_id, "id"
+                    )
+                    if customer_result.success and customer_result.data:
+                        import json
+
+                        # Parse customer data
+                        if hasattr(customer_result.data[0], "text"):
+                            customer_text = customer_result.data[0].text
+                        elif (
+                            isinstance(customer_result.data[0], dict)
+                            and "text" in customer_result.data[0]
+                        ):
+                            customer_text = customer_result.data[0]["text"]
+                        else:
+                            customer_text = str(customer_result.data[0])
+
+                        customer_data = json.loads(customer_text)
+
+                        # Build customer name
+                        first_name = customer_data.get("first_name", "")
+                        last_name = customer_data.get("last_name", "")
+                        if first_name or last_name:
+                            enhanced_order["customer_name"] = (
+                                f"{first_name} {last_name}".strip()
+                            )
+                        else:
+                            enhanced_order["customer_name"] = customer_data.get(
+                                "email", "Unknown Customer"
+                            )
+
+                except Exception as e:
+                    logger.debug(
+                        f"Could not fetch customer info for {customer_id}: {e}"
+                    )
+                    enhanced_order["customer_name"] = f"Customer {customer_id}"
+
+            enhanced_orders.append(enhanced_order)
+
+        return enhanced_orders
 
     # ... existing methods ...
 

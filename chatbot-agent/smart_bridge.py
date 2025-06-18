@@ -11,6 +11,7 @@ import logging
 from typing import Set
 import sys
 from pathlib import Path
+import socket
 
 # Add the project root to the Python path
 project_root = Path(__file__).parent.parent
@@ -24,10 +25,26 @@ logger = logging.getLogger(__name__)
 from egile.smart_agent import SmartAgent
 
 
+def find_available_port(start_port=8770, max_attempts=20):
+    """Find an available port starting from start_port"""
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise OSError(
+        f"No available ports found in range {start_port}-{start_port + max_attempts}"
+    )
+
+
 class SmartChatbotBridge:
     def __init__(self):
         self.agent: SmartAgent = None
         self.connected_clients: Set = set()
+        self.max_clients = 10  # Limit connections
+        self.client_addresses: dict = {}  # Track client addresses
 
     async def start_agent(self):
         """Initialize and start the Smart Agent"""
@@ -47,6 +64,37 @@ class SmartChatbotBridge:
 
     async def handle_client(self, websocket, path=None):
         """Handle incoming WebSocket connections"""
+
+        # Check connection limit
+        if len(self.connected_clients) >= self.max_clients:
+            logger.warning(
+                f"Connection limit reached ({self.max_clients}), rejecting new connection"
+            )
+            await websocket.close(1008, "Server full")
+            return
+
+        client_address = websocket.remote_address
+        logger.info(f"New connection from {client_address}")
+
+        # Track client address connections
+        if client_address not in self.client_addresses:
+            self.client_addresses[client_address] = []
+        self.client_addresses[client_address].append(websocket)
+
+        # Limit connections per IP
+        if len(self.client_addresses[client_address]) > 3:
+            logger.warning(
+                f"Too many connections from {client_address}, closing oldest"
+            )
+            # Close oldest connection
+            oldest = self.client_addresses[client_address].pop(0)
+            if oldest in self.connected_clients:
+                self.connected_clients.discard(oldest)
+                try:
+                    await oldest.close(1008, "Too many connections")
+                except Exception as e:
+                    logger.debug(f"Error closing old connection: {e}")
+
         self.connected_clients.add(websocket)
         logger.info(f"Client connected. Total clients: {len(self.connected_clients)}")
 
@@ -82,7 +130,16 @@ class SmartChatbotBridge:
         except websockets.exceptions.ConnectionClosed:
             logger.info("Client disconnected")
         finally:
+            # Clean up client tracking
             self.connected_clients.discard(websocket)
+
+            # Clean up address tracking
+            if client_address in self.client_addresses:
+                if websocket in self.client_addresses[client_address]:
+                    self.client_addresses[client_address].remove(websocket)
+                if not self.client_addresses[client_address]:
+                    del self.client_addresses[client_address]
+
             logger.info(f"Client removed. Total clients: {len(self.connected_clients)}")
 
     async def process_message(self, websocket, data):
@@ -94,6 +151,15 @@ class SmartChatbotBridge:
                 "timestamp": asyncio.get_event_loop().time(),
             }
             await websocket.send(json.dumps(error_msg))
+            return
+
+        # Handle ping messages
+        if data.get("type") == "ping":
+            pong_msg = {
+                "type": "pong",
+                "timestamp": asyncio.get_event_loop().time(),
+            }
+            await websocket.send(json.dumps(pong_msg))
             return
 
         user_message = data.get("message", "")
@@ -143,35 +209,24 @@ class SmartChatbotBridge:
 
         logger.info(f"Starting Smart Chatbot Bridge on {host}:{port}")
 
-        # Try multiple ports if the default is in use
-        max_attempts = 5
-        current_port = port
+        # Find an available port if the default is in use
+        try:
+            port = find_available_port(port)
+            logger.info(f"Using available port: {port}")
+        except OSError as e:
+            logger.error(f"Failed to find an available port: {e}")
+            return
 
-        for attempt in range(max_attempts):
-            try:
-                # Use direct method reference for better compatibility
-                async with websockets.serve(self.handle_client, host, current_port):
-                    logger.info(
-                        f"Smart Chatbot Bridge listening on ws://{host}:{current_port}"
-                    )
-                    print(f"✅ Smart Agent Bridge started on port {current_port}")
-                    # Keep the server running
-                    await asyncio.Future()  # Run forever
-            except OSError as e:
-                if "Address already in use" in str(e) and attempt < max_attempts - 1:
-                    current_port += 1
-                    logger.warning(
-                        f"Port {current_port - 1} in use, trying port {current_port}"
-                    )
-                    continue
-                else:
-                    logger.error(f"Server error after {max_attempts} attempts: {e}")
-                    print(f"❌ Failed to start server: {e}")
-                    break
-            except Exception as e:
-                logger.error(f"Server error: {e}")
-                print(f"❌ Server error: {e}")
-                break
+        try:
+            # Use direct method reference for better compatibility
+            async with websockets.serve(self.handle_client, host, port):
+                logger.info(f"Smart Chatbot Bridge listening on ws://{host}:{port}")
+                print(f"✅ Smart Agent Bridge started on port {port}")
+                # Keep the server running
+                await asyncio.Future()  # Run forever
+        except Exception as e:
+            logger.error(f"Server error: {e}")
+            print(f"❌ Server error: {e}")
 
         await self.stop_agent()
 
