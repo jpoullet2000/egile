@@ -168,13 +168,20 @@ class SmartAgent:
             ],
             "simple_queries": [
                 r"^(show|list|display|get|find|search)",
-                r"^(create|add|new).*(product|customer|order)$",
+                r"^(create|add|new).*(product|customer|order).*",
                 r"^(update|modify|change).*(price|stock|status)",
                 r"^(delete|remove).*(product|customer|order)",
                 r"(what|which).*(product|item).*low.*stock",
                 r"(what|which).*(product|item).*(out of|low|stock)",
                 r"(show|find|list).*(low|stock|inventory)",
                 r"(stock|inventory).*(level|status|low|alert)",
+                # Enhanced customer creation patterns
+                r"(create|add|new|register).*(customer|client|user)",
+                r"(add|create).*customer.*(name|email)",
+                r"(register|signup|sign up).*(customer|user)",
+                r"(customer|client).*(name|email|phone|address)",
+                r"[A-Za-z]+\s+[A-Za-z]+.*@.*\.(com|org|net)",  # Name + email pattern
+                r"(john|jane|bob|alice|mike|sarah|david|mary).*@.*\.(com|org|net)",  # Common names + email
             ],
             "plan_continuation": [
                 r"^(yes|y|ok|proceed|continue|next)$",
@@ -261,6 +268,8 @@ class SmartAgent:
 
     def _extract_simple_query_details(self, original: str, text: str) -> Dict[str, Any]:
         """Extract details for simple queries."""
+        import re
+
         # Check for low stock queries first
         if ("low" in text and "stock" in text) or ("stock" in text and "level" in text):
             return {
@@ -268,6 +277,23 @@ class SmartAgent:
                 "action": "list_low_stock",
                 "original": original,
             }
+
+        # Check for customer creation patterns (enhanced)
+        customer_patterns = [
+            r"(create|add|new|register).*(customer|client|user)",
+            r"^customer\s+[A-Z][a-z]+\s+[A-Z][a-z]+",  # "customer John Doe"
+            r"(customer|client).*(name|email|phone|address)",
+            r"[A-Za-z]+\s+[A-Za-z]+.*@.*\.(com|org|net)",  # Name + email pattern
+            r"(john|jane|bob|alice|mike|sarah|david|mary).*@.*\.(com|org|net)",  # Common names + email
+        ]
+
+        for pattern in customer_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return {
+                    "type": "simple_query",
+                    "action": "create_customer",
+                    "original": original,
+                }
 
         if text.startswith("show") or text.startswith("list"):
             if "product" in text:
@@ -603,6 +629,113 @@ class SmartAgent:
                         "stock_quantity",
                     ],
                 }
+
+            elif action == "create_customer":
+                # Check if we have the required parameters
+                params = intent.get("parameters", {})
+
+                # Add the original text for natural language parsing
+                params["original_text"] = intent.get("original", "")
+
+                # Try to parse from natural language first
+                parsed_info = self._parse_customer_from_text(params["original_text"])
+
+                # Merge parsed info with any explicitly provided parameters
+                for key, value in parsed_info.items():
+                    if value and not params.get(key):
+                        params[key] = value
+
+                required_fields = ["email", "first_name", "last_name"]
+                missing_fields = [
+                    field for field in required_fields if not params.get(field)
+                ]
+
+                if missing_fields:
+                    return {
+                        "success": True,
+                        "message": "To create a customer, I need: email, first name, and last name. "
+                        + f"From your message, I found: {self._format_parsed_info(parsed_info)}. "
+                        + f"Still missing: {', '.join(missing_fields)}. "
+                        + "Please provide the missing information.",
+                        "type": "needs_input",
+                        "required_fields": missing_fields,
+                        "optional_fields": ["phone", "address"],
+                        "parsed_info": parsed_info,
+                    }
+                else:
+                    # We have all required fields, create the customer
+                    try:
+                        result = await self.ecommerce_agent.create_customer(
+                            email=params["email"],
+                            first_name=params["first_name"],
+                            last_name=params["last_name"],
+                            phone=params.get("phone"),
+                            address=params.get("address"),
+                        )
+
+                        if result.success:
+                            # Parse the response data if it's JSON
+                            try:
+                                import json
+
+                                # Handle different response structures
+                                response_data = result.data
+                                if (
+                                    isinstance(response_data, list)
+                                    and len(response_data) > 0
+                                ):
+                                    if (
+                                        isinstance(response_data[0], dict)
+                                        and "text" in response_data[0]
+                                    ):
+                                        # Standard MCP response format
+                                        text_content = response_data[0]["text"]
+                                        if isinstance(text_content, str):
+                                            customer_data = json.loads(text_content)
+                                        else:
+                                            customer_data = text_content
+                                    elif isinstance(response_data[0], dict):
+                                        # Direct dict response
+                                        customer_data = response_data[0]
+                                    else:
+                                        # Fallback
+                                        customer_data = {"id": "unknown"}
+                                else:
+                                    customer_data = {"id": "unknown"}
+
+                                customer_name = (
+                                    f"{params['first_name']} {params['last_name']}"
+                                )
+                                customer_id = customer_data.get("id", "unknown")
+
+                                return {
+                                    "success": True,
+                                    "message": f"Successfully created customer: {customer_name} (ID: {customer_id}, Email: {params['email']})",
+                                    "type": "customer_created",
+                                    "data": customer_data,
+                                }
+                            except Exception as parse_error:
+                                logger.error(
+                                    f"Error parsing customer creation response: {parse_error}"
+                                )
+                                return {
+                                    "success": True,
+                                    "message": f"Customer {params['first_name']} {params['last_name']} was created successfully.",
+                                    "type": "customer_created",
+                                }
+                        else:
+                            return {
+                                "success": False,
+                                "message": f"Failed to create customer: {result.error}",
+                                "type": "creation_failed",
+                            }
+                    except Exception as e:
+                        logger.error(f"Error creating customer: {e}")
+                        return {
+                            "success": False,
+                            "message": f"Error creating customer: {str(e)}",
+                            "type": "error",
+                        }
 
             else:
                 return {
@@ -1031,6 +1164,8 @@ class SmartAgent:
                 return await self._create_sample_customers(params)
             elif action == "create_sample_orders":
                 return await self._create_sample_orders(params)
+            elif action == "create_customer":
+                return await self._create_customer(params)
             elif action == "generate_store_summary":
                 return await self._generate_store_summary()
             elif action == "collect_all_data":
@@ -1696,6 +1831,250 @@ Just tell me what you'd like to accomplish in natural language!
             formatted += f"   📅 Date: {date_str}\n\n"
 
         return formatted.strip()
+
+    async def _create_customer(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a customer with smart natural language parsing."""
+        try:
+            # Extract original text for parsing
+            original_text = params.get("original_text", "")
+
+            # Try to parse customer information from natural language
+            parsed_info = self._parse_customer_from_text(original_text)
+
+            # Merge with any explicitly provided parameters
+            for key, value in params.items():
+                if key != "original_text" and value:
+                    parsed_info[key] = value
+
+            # Check required fields
+            required_fields = ["email", "first_name", "last_name"]
+            missing_fields = [
+                field for field in required_fields if not parsed_info.get(field)
+            ]
+
+            if missing_fields:
+                return {
+                    "success": False,
+                    "message": f"To create a customer, I need: {', '.join(missing_fields)}. "
+                    + f"Parsed from your message: {self._format_parsed_info(parsed_info)}. "
+                    + "Please provide the missing information.",
+                    "type": "needs_input",
+                    "required_fields": missing_fields,
+                    "parsed_info": parsed_info,
+                }
+
+            # Create the customer
+            result = await self.ecommerce_agent.create_customer(
+                email=parsed_info["email"],
+                first_name=parsed_info["first_name"],
+                last_name=parsed_info["last_name"],
+                phone=parsed_info.get("phone"),
+                address=parsed_info.get("address"),
+            )
+
+            if result.success:
+                try:
+                    import json
+
+                    if isinstance(result.data[0]["text"], str):
+                        customer_data = json.loads(result.data[0]["text"])
+                    else:
+                        customer_data = result.data[0]["text"]
+
+                    customer_name = (
+                        f"{parsed_info['first_name']} {parsed_info['last_name']}"
+                    )
+                    customer_id = customer_data.get("id", "unknown")
+
+                    return {
+                        "success": True,
+                        "message": f"Successfully created customer: {customer_name} "
+                        + f"(ID: {customer_id}, Email: {parsed_info['email']})",
+                        "type": "customer_created",
+                        "data": customer_data,
+                    }
+                except Exception as parse_error:
+                    logger.error(
+                        f"Error parsing customer creation response: {parse_error}"
+                    )
+                    return {
+                        "success": True,
+                        "message": f"Customer {parsed_info['first_name']} {parsed_info['last_name']} was created successfully.",
+                        "type": "customer_created",
+                    }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Failed to create customer: {result.error}",
+                    "type": "creation_failed",
+                }
+
+        except Exception as e:
+            logger.error(f"Error in _create_customer: {e}")
+            return {
+                "success": False,
+                "message": f"Error creating customer: {str(e)}",
+                "type": "error",
+            }
+
+    def _parse_customer_from_text(self, text: str) -> Dict[str, str]:
+        """Parse customer information from natural language text."""
+        import re
+
+        parsed = {}
+
+        # Email patterns - more comprehensive
+        email_patterns = [
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+            r"email[:\s]+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})",
+            r"at\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})",
+        ]
+
+        for pattern in email_patterns:
+            email_match = re.search(pattern, text, re.IGNORECASE)
+            if email_match:
+                if "@" in email_match.group(0):
+                    parsed["email"] = email_match.group(0).strip()
+                else:
+                    parsed["email"] = email_match.group(1).strip()
+                break
+
+        # Phone patterns
+        phone_patterns = [
+            r"\b(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b",
+            r"phone[:\s]+(\+?[\d\s\-\(\)\.]+)",
+            r"call[:\s]+(\+?[\d\s\-\(\)\.]+)",
+            r"tel[:\s]+(\+?[\d\s\-\(\)\.]+)",
+        ]
+
+        for pattern in phone_patterns:
+            phone_match = re.search(pattern, text, re.IGNORECASE)
+            if phone_match:
+                if pattern == phone_patterns[0]:  # Standard US format
+                    parsed["phone"] = (
+                        f"({phone_match.group(1)}) {phone_match.group(2)}-{phone_match.group(3)}"
+                    )
+                else:
+                    parsed["phone"] = phone_match.group(1).strip()
+                break
+
+        # Name patterns - try to identify first and last names
+        name_patterns = [
+            # "create customer John Doe"
+            r"(?:create|add|new|register).*?customer\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)",
+            # "customer named John Doe" or "customer John Doe"
+            r"customer\s+(?:named\s+)?([A-Z][a-z]+)\s+([A-Z][a-z]+)",
+            # "name is John Doe" or "name: John Doe"
+            r"name\s*(?:is|:)\s*([A-Z][a-z]+)\s+([A-Z][a-z]+)",
+            # "first name John last name Doe"
+            r"first\s*name\s*[:\s]*([A-Z][a-z]+).*?last\s*name\s*[:\s]*([A-Z][a-z]+)",
+            # "John Doe" at the beginning of text (capitalized words that might be names)
+            r"^\s*([A-Z][a-z]+)\s+([A-Z][a-z]+)",
+            # "John Doe" followed by email
+            r"\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\s+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}",
+        ]
+
+        for pattern in name_patterns:
+            name_match = re.search(pattern, text, re.IGNORECASE)
+            if name_match:
+                potential_first = name_match.group(1).capitalize()
+                potential_last = name_match.group(2).capitalize()
+
+                # Avoid common false positives and validate names
+                common_words = {
+                    "Create",
+                    "Customer",
+                    "Name",
+                    "Email",
+                    "Phone",
+                    "Address",
+                    "New",
+                    "Add",
+                    "Named",
+                    "With",
+                    "And",
+                    "The",
+                    "At",
+                    "In",
+                    "On",
+                    "For",
+                    "To",
+                    "From",
+                }
+                if (
+                    potential_first not in common_words
+                    and potential_last not in common_words
+                    and len(potential_first) > 1
+                    and len(potential_last) > 1
+                    and potential_first.isalpha()
+                    and potential_last.isalpha()
+                ):
+                    parsed["first_name"] = potential_first
+                    parsed["last_name"] = potential_last
+                    break
+
+        # Address patterns
+        address_patterns = [
+            r"address[:\s]+(.+?)(?:\s+phone|\s+email|\s*$)",
+            r"lives?\s+(?:at|in)\s+(.+?)(?:\s+phone|\s+email|\s*$)",
+            r"(?:street|st|ave|avenue|road|rd|blvd|boulevard)[:\s]+(.+?)(?:\s+phone|\s+email|\s*$)",
+        ]
+
+        for pattern in address_patterns:
+            address_match = re.search(pattern, text, re.IGNORECASE)
+            if address_match:
+                address = address_match.group(1).strip()
+                # Clean up common artifacts
+                address = re.sub(
+                    r"\s+(and|with|phone|email|tel).*$",
+                    "",
+                    address,
+                    flags=re.IGNORECASE,
+                )
+                if len(address) > 5:  # Reasonable minimum address length
+                    parsed["address"] = address
+                break
+
+        # Try to extract from more structured text like "John Doe john@email.com (555) 123-4567"
+        if not parsed.get("first_name") or not parsed.get("last_name"):
+            # Look for pattern: Name Email Phone
+            structured_pattern = r"([A-Z][a-z]+)\s+([A-Z][a-z]+)\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})"
+            structured_match = re.search(structured_pattern, text)
+            if structured_match:
+                parsed["first_name"] = structured_match.group(1)
+                parsed["last_name"] = structured_match.group(2)
+                if not parsed.get("email"):
+                    parsed["email"] = structured_match.group(3)
+
+        return parsed
+
+    def _format_parsed_info(self, parsed_info: Dict[str, str]) -> str:
+        """Format parsed customer information for display."""
+        if not parsed_info:
+            return "no information could be extracted"
+
+        formatted = []
+        if parsed_info.get("first_name") and parsed_info.get("last_name"):
+            formatted.append(
+                f"Name: {parsed_info['first_name']} {parsed_info['last_name']}"
+            )
+        elif parsed_info.get("first_name"):
+            formatted.append(f"First name: {parsed_info['first_name']}")
+        elif parsed_info.get("last_name"):
+            formatted.append(f"Last name: {parsed_info['last_name']}")
+
+        if parsed_info.get("email"):
+            formatted.append(f"Email: {parsed_info['email']}")
+
+        if parsed_info.get("phone"):
+            formatted.append(f"Phone: {parsed_info['phone']}")
+
+        if parsed_info.get("address"):
+            formatted.append(f"Address: {parsed_info['address']}")
+
+        return ", ".join(formatted) if formatted else "no valid information"
+
+    # ... existing methods ...
 
 
 # Demo function
