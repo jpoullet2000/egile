@@ -572,13 +572,22 @@ class SmartAgent:
                                         "message": "Error parsing customer data from server.",
                                     }
 
+                            # Enhance customers with order counts
+                            enhanced_customers = (
+                                await self._enhance_customers_with_order_counts(
+                                    customers[:10]
+                                )
+                            )
+
                             # Format the customers nicely
-                            formatted_customers = self._format_customers(customers[:10])
+                            formatted_customers = self._format_customers(
+                                enhanced_customers
+                            )
 
                             return {
                                 "success": True,
                                 "message": f"Found {len(customers)} customers. Here are the first 10:\n\n{formatted_customers}",
-                                "data": customers[:10],
+                                "data": enhanced_customers,
                                 "type": "customer_list",
                             }
                         else:
@@ -2141,7 +2150,6 @@ Just tell me what you'd like to accomplish in natural language!
                     "message": f"Failed to create customer: {result.error}",
                     "type": "creation_failed",
                 }
-
         except Exception as e:
             logger.error(f"Error in _create_customer: {e}")
             return {
@@ -2733,6 +2741,52 @@ Example format:
             enhanced_orders.append(enhanced_order)
 
         return enhanced_orders
+
+    async def _enhance_customers_with_order_counts(self, customers: list) -> list:
+        """Enhance customer data with order counts."""
+        enhanced_customers = []
+
+        try:
+            # Get all orders to count them per customer
+            orders_result = await self.ecommerce_agent.get_all_orders()
+            orders = []
+
+            if orders_result.success and orders_result.data:
+                if isinstance(orders_result.data, list) and isinstance(
+                    orders_result.data[0], dict
+                ):
+                    orders = orders_result.data
+                else:
+                    orders = robust_json_parse(
+                        orders_result.data[0], "all_orders_for_counts"
+                    )
+                    if orders is None:
+                        orders = []
+
+            # Count orders per customer
+            order_counts = {}
+            if orders:
+                for order in orders:
+                    customer_id = order.get("customer_id")
+                    if customer_id:
+                        order_counts[customer_id] = order_counts.get(customer_id, 0) + 1
+
+            # Enhance each customer with order count
+            for customer in customers:
+                enhanced_customer = customer.copy()
+                customer_id = customer.get("id")
+                enhanced_customer["total_orders"] = order_counts.get(customer_id, 0)
+                enhanced_customers.append(enhanced_customer)
+
+        except Exception as e:
+            logger.error(f"Error enhancing customers with order counts: {e}")
+            # Return original customers if enhancement fails
+            for customer in customers:
+                enhanced_customer = customer.copy()
+                enhanced_customer["total_orders"] = 0
+                enhanced_customers.append(enhanced_customer)
+
+        return enhanced_customers
 
     async def _handle_single_product(
         self, parsed_info: Dict[str, str], params: Dict[str, Any]
@@ -3339,22 +3393,55 @@ Example format:
                 logger.info(
                     f"Customer creation result: success={create_result.success}, data={create_result.data}"
                 )
+                logger.info(f"Customer creation data type: {type(create_result.data)}")
+                if create_result.data:
+                    logger.info(
+                        f"Customer creation data length: {len(create_result.data) if hasattr(create_result.data, '__len__') else 'N/A'}"
+                    )
+                    if (
+                        hasattr(create_result.data, "__len__")
+                        and len(create_result.data) > 0
+                    ):
+                        logger.info(
+                            f"First data item: {create_result.data[0]}, type: {type(create_result.data[0])}"
+                        )
 
                 if create_result.success:
+                    logger.info(
+                        f"DEBUG: create_result.data = {repr(create_result.data)}"
+                    )
                     try:
                         # Check if we got an error message indicating duplicate email
-                        if (
-                            create_result.data
-                            and len(create_result.data) > 0
-                            and isinstance(create_result.data[0], str)
-                            and "UNIQUE constraint failed" in create_result.data[0]
-                        ):
+                        # Handle different possible formats of the error message
+                        unique_constraint_detected = False
+                        error_message = ""
+
+                        if create_result.data:
+                            if isinstance(create_result.data, str):
+                                error_message = create_result.data
+                                unique_constraint_detected = (
+                                    "UNIQUE constraint failed" in error_message
+                                )
+                            elif (
+                                isinstance(create_result.data, list)
+                                and len(create_result.data) > 0
+                            ):
+                                error_message = str(create_result.data[0])
+                                unique_constraint_detected = (
+                                    "UNIQUE constraint failed" in error_message
+                                )
+
+                        logger.info(
+                            f"UNIQUE constraint detected: {unique_constraint_detected}, error_message: {error_message}"
+                        )
+
+                        if unique_constraint_detected:
                             logger.info(
                                 "Customer already exists due to UNIQUE constraint, finding existing customer"
                             )
 
                             # Customer already exists, find it by listing all customers
-                            list_result = await self.ecommerce_agent.list_customers()
+                            list_result = await self.ecommerce_agent.get_all_customers()
                             logger.info(
                                 f"Listed customers for search: success={list_result.success}, data_length={len(list_result.data) if list_result.data else 0}"
                             )
@@ -3391,10 +3478,27 @@ Example format:
                             search_result = await self.ecommerce_agent.get_customer(
                                 customer_email, "email"
                             )
+                            logger.info(
+                                f"Direct customer search result: success={search_result.success}, data={search_result.data}, data_type={type(search_result.data)}"
+                            )
 
                             if search_result.success and search_result.data:
-                                existing_customer = robust_json_parse(
-                                    search_result.data[0], "existing_customer_direct"
+                                # search_result.data is already the customer dict, not a list
+                                if isinstance(search_result.data, dict):
+                                    existing_customer = search_result.data
+                                elif (
+                                    isinstance(search_result.data, list)
+                                    and len(search_result.data) > 0
+                                ):
+                                    existing_customer = robust_json_parse(
+                                        search_result.data[0],
+                                        "existing_customer_direct",
+                                    )
+                                else:
+                                    existing_customer = None
+
+                                logger.info(
+                                    f"Parsed existing customer result: {existing_customer}"
                                 )
 
                                 if existing_customer and isinstance(
