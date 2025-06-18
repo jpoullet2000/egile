@@ -171,6 +171,10 @@ class SmartAgent:
                 r"^(create|add|new).*(product|customer|order)$",
                 r"^(update|modify|change).*(price|stock|status)",
                 r"^(delete|remove).*(product|customer|order)",
+                r"(what|which).*(product|item).*low.*stock",
+                r"(what|which).*(product|item).*(out of|low|stock)",
+                r"(show|find|list).*(low|stock|inventory)",
+                r"(stock|inventory).*(level|status|low|alert)",
             ],
             "plan_continuation": [
                 r"^(yes|y|ok|proceed|continue|next)$",
@@ -257,6 +261,14 @@ class SmartAgent:
 
     def _extract_simple_query_details(self, original: str, text: str) -> Dict[str, Any]:
         """Extract details for simple queries."""
+        # Check for low stock queries first
+        if ("low" in text and "stock" in text) or ("stock" in text and "level" in text):
+            return {
+                "type": "simple_query",
+                "action": "list_low_stock",
+                "original": original,
+            }
+
         if text.startswith("show") or text.startswith("list"):
             if "product" in text:
                 return {
@@ -335,9 +347,12 @@ class SmartAgent:
 
                                 products = json.loads(products_text)
 
+                            # Format the products nicely
+                            formatted_products = self._format_products(products[:10])
+
                             return {
                                 "success": True,
-                                "message": f"Found {len(products)} products in the store. Here are the first 10:",
+                                "message": f"Found {len(products)} products in the store. Here are the first 10:\n\n{formatted_products}",
                                 "data": products[:10],  # Show first 10
                                 "type": "product_list",
                             }
@@ -390,9 +405,12 @@ class SmartAgent:
 
                                 customers = json.loads(customers_text)
 
+                            # Format the customers nicely
+                            formatted_customers = self._format_customers(customers[:10])
+
                             return {
                                 "success": True,
-                                "message": f"Found {len(customers)} customers. Here are the first 10:",
+                                "message": f"Found {len(customers)} customers. Here are the first 10:\n\n{formatted_customers}",
                                 "data": customers[:10],
                                 "type": "customer_list",
                             }
@@ -423,13 +441,53 @@ class SmartAgent:
                 if result.success:
                     import json
 
-                    orders = json.loads(result.data[0]["text"])
-                    return {
-                        "success": True,
-                        "message": f"Found {len(orders)} orders.",
-                        "data": orders[:10],
-                        "type": "order_list",
-                    }
+                    try:
+                        if result.data and len(result.data) > 0:
+                            # Check if result.data is already a list of orders
+                            if isinstance(result.data, list) and isinstance(
+                                result.data[0], dict
+                            ):
+                                # Data is already parsed
+                                orders = result.data
+                            else:
+                                # Handle text content structure
+                                if hasattr(result.data[0], "text"):
+                                    orders_text = result.data[0].text
+                                elif (
+                                    isinstance(result.data[0], dict)
+                                    and "text" in result.data[0]
+                                ):
+                                    orders_text = result.data[0]["text"]
+                                else:
+                                    orders_text = str(result.data[0])
+
+                                orders = json.loads(orders_text)
+
+                            # Format the orders nicely
+                            formatted_orders = self._format_orders(orders[:10])
+
+                            return {
+                                "success": True,
+                                "message": f"Found {len(orders)} orders. Here are the first 10:\n\n{formatted_orders}",
+                                "data": orders[:10],
+                                "type": "order_list",
+                            }
+                        else:
+                            return {
+                                "success": False,
+                                "message": "No order data received from server.",
+                            }
+                    except (
+                        json.JSONDecodeError,
+                        KeyError,
+                        AttributeError,
+                        IndexError,
+                    ) as e:
+                        logger.error(f"Error parsing order data: {e}")
+                        return {
+                            "success": False,
+                            "message": f"Error parsing order data: {str(e)}",
+                        }
                 else:
                     return {
                         "success": False,
@@ -460,6 +518,75 @@ class SmartAgent:
                     return {
                         "success": False,
                         "message": f"Search failed: {result.error}",
+                    }
+
+            elif action == "list_low_stock":
+                threshold = intent.get("parameters", {}).get("threshold", 10)
+                result = await self.ecommerce_agent.get_low_stock_products(threshold)
+                if result.success:
+                    import json
+
+                    try:
+                        if result.data and len(result.data) > 0:
+                            # Check if result.data is already a list of products
+                            if isinstance(result.data, list) and isinstance(
+                                result.data[0], dict
+                            ):
+                                # Data is already parsed
+                                products = result.data
+                            else:
+                                # Handle text content structure
+                                if hasattr(result.data[0], "text"):
+                                    products_text = result.data[0].text
+                                elif (
+                                    isinstance(result.data[0], dict)
+                                    and "text" in result.data[0]
+                                ):
+                                    products_text = result.data[0]["text"]
+                                else:
+                                    products_text = str(result.data[0])
+
+                                products = json.loads(products_text)
+
+                            if products:
+                                # Format the low stock products nicely
+                                formatted_products = self._format_products(products)
+
+                                return {
+                                    "success": True,
+                                    "message": f"Found {len(products)} products with low stock (below {threshold} units):\n\n{formatted_products}",
+                                    "data": products,
+                                    "type": "low_stock_list",
+                                }
+                            else:
+                                return {
+                                    "success": True,
+                                    "message": f"Great news! No products are currently low on stock (below {threshold} units).",
+                                    "data": [],
+                                    "type": "low_stock_list",
+                                }
+                        else:
+                            return {
+                                "success": True,
+                                "message": f"Great news! No products are currently low on stock (below {threshold} units).",
+                                "data": [],
+                                "type": "low_stock_list",
+                            }
+                    except (
+                        json.JSONDecodeError,
+                        KeyError,
+                        AttributeError,
+                        IndexError,
+                    ) as e:
+                        logger.error(f"Error parsing low stock data: {e}")
+                        return {
+                            "success": False,
+                            "message": f"Error parsing low stock data: {str(e)}",
+                        }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"Failed to get low stock products: {result.error}",
                     }
 
             elif action == "create_product":
@@ -794,6 +921,10 @@ class SmartAgent:
                         step.status = "completed"
                         step.result = step_result.get("data")
                         completed_steps += 1
+
+                        # Store step result in context for subsequent steps
+                        plan.context[step.id] = step_result
+
                         results.append(
                             {
                                 "step": step.id,
@@ -827,9 +958,22 @@ class SmartAgent:
             plan.status = "completed"
             success_count = len([r for r in results if r["success"]])
 
+            # Check if the last step generated a report or important output
+            final_step_message = ""
+            if results and results[-1]["success"]:
+                last_step = plan.steps[-1]
+                if last_step.result and isinstance(last_step.result, dict):
+                    # If the last step has a message or report, include it
+                    if "report" in last_step.result:
+                        final_step_message = f"\n\n{last_step.result['report']}"
+                    elif last_step.result.get("message"):
+                        final_step_message = f"\n\n{last_step.result['message']}"
+
+            completion_message = f"Plan '{plan.title}' completed! ({success_count}/{len(results)} steps successful){final_step_message}"
+
             return {
                 "success": True,
-                "message": f"Plan '{plan.title}' completed! ({success_count}/{len(results)} steps successful)",
+                "message": completion_message,
                 "type": "plan_completed",
                 "results": results,
                 "summary": self._generate_execution_summary(results),
@@ -1230,18 +1374,10 @@ class SmartAgent:
             customers_result = await self.ecommerce_agent.get_all_customers()
             orders_result = await self.ecommerce_agent.get_all_orders()
 
-            import json
-
             data = {
-                "products": json.loads(products_result.data[0]["text"])
-                if products_result.success
-                else [],
-                "customers": json.loads(customers_result.data[0]["text"])
-                if customers_result.success
-                else [],
-                "orders": json.loads(orders_result.data[0]["text"])
-                if orders_result.success
-                else [],
+                "products": products_result.data if products_result.success else [],
+                "customers": customers_result.data if customers_result.success else [],
+                "orders": orders_result.data if orders_result.success else [],
             }
 
             return {
@@ -1283,26 +1419,125 @@ class SmartAgent:
     async def _compile_analytics_report(
         self, context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Compile analytics report."""
-        report = """
-📊 **Analytics Report**
+        """Compile comprehensive analytics report using collected data."""
+        try:
+            # Get the collected data from context
+            collected_data = context.get("collect_data", {}).get("data", {})
+            products = collected_data.get("products", [])
+            customers = collected_data.get("customers", [])
+            orders = collected_data.get("orders", [])
 
-✅ Analysis completed for:
-• Product performance
-• Customer behavior  
-• Sales patterns
+            # Calculate key metrics
+            total_products = len(products)
+            total_customers = len(customers)
+            total_orders = len(orders)
 
-📈 **Key Insights:**
-• Store operations are functioning well
-• Data collection and analysis pipeline working
-• Ready for detailed business intelligence
+            # Product analytics
+            active_products = len([p for p in products if p.get("is_active", True)])
+            low_stock_products = len(
+                [p for p in products if p.get("stock_quantity", 0) < 10]
+            )
 
-        """
-        return {
-            "success": True,
-            "message": "Analytics report compiled",
-            "data": {"report": report.strip()},
-        }
+            # Category breakdown
+            categories = {}
+            total_inventory_value = 0
+            for product in products:
+                category = product.get("category", "Unknown")
+                categories[category] = categories.get(category, 0) + 1
+                total_inventory_value += product.get("price", 0) * product.get(
+                    "stock_quantity", 0
+                )
+
+            # Order analytics
+            total_revenue = sum(order.get("total_amount", 0) for order in orders)
+            completed_orders = len(
+                [o for o in orders if o.get("status") == "completed"]
+            )
+
+            # Customer analytics
+            active_customers = len([c for c in customers if c.get("is_active", True)])
+
+            # Generate report
+            report = f"""
+📊 **E-COMMERCE ANALYTICS REPORT**
+Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+═══════════════════════════════════════
+
+📦 **PRODUCT OVERVIEW**
+• Total Products: {total_products}
+• Active Products: {active_products}
+• Low Stock Alert: {low_stock_products} products (<10 items)
+• Total Inventory Value: ${total_inventory_value:,.2f}
+
+**Category Breakdown:**
+"""
+
+            for category, count in sorted(categories.items()):
+                report += f"  • {category}: {count} products\n"
+
+            report += f"""
+👥 **CUSTOMER OVERVIEW**
+• Total Customers: {total_customers}
+• Active Customers: {active_customers}
+• Customer Retention: {(active_customers / total_customers * 100) if total_customers > 0 else 0:.1f}%
+
+📋 **ORDER OVERVIEW**
+• Total Orders: {total_orders}
+• Completed Orders: {completed_orders}
+• Total Revenue: ${total_revenue:,.2f}
+• Completion Rate: {(completed_orders / total_orders * 100) if total_orders > 0 else 0:.1f}%
+
+📈 **KEY INSIGHTS**
+"""
+
+            # Add insights based on data
+            insights = []
+            if low_stock_products > 0:
+                insights.append(f"⚠️  {low_stock_products} products need restocking")
+            if total_revenue > 0:
+                avg_order_value = (
+                    total_revenue / total_orders if total_orders > 0 else 0
+                )
+                insights.append(f"💰 Average order value: ${avg_order_value:.2f}")
+            if categories:
+                top_category = max(categories, key=categories.get)
+                insights.append(
+                    f"🏆 Top category: {top_category} ({categories[top_category]} products)"
+                )
+
+            if insights:
+                for insight in insights:
+                    report += f"  {insight}\n"
+            else:
+                report += "  • Store data collected successfully\n  • Ready for detailed analysis\n"
+
+            report += """
+═══════════════════════════════════════
+Report generated by Smart E-commerce Agent
+"""
+
+            return {
+                "success": True,
+                "message": report.strip(),
+                "data": {
+                    "report": report.strip(),
+                    "metrics": {
+                        "total_products": total_products,
+                        "total_customers": total_customers,
+                        "total_orders": total_orders,
+                        "total_revenue": total_revenue,
+                        "low_stock_products": low_stock_products,
+                    },
+                },
+            }
+
+        except Exception as e:
+            logger.error(f"Error compiling analytics report: {e}")
+            return {
+                "success": False,
+                "message": f"Failed to compile analytics report: {str(e)}",
+            }
 
     def _generate_execution_summary(self, results: List[Dict[str, Any]]) -> str:
         """Generate execution summary."""
@@ -1352,6 +1587,115 @@ Just tell me what you'd like to accomplish in natural language!
                 "help",
             ],
         }
+
+    def _format_products(self, products: list) -> str:
+        """Format product list for user-friendly display."""
+        if not products:
+            return "No products found."
+
+        formatted = ""
+        for i, product in enumerate(products, 1):
+            name = product.get("name", "Unknown Product")
+            price = product.get("price", 0)
+            currency = product.get("currency", "USD")
+            stock = product.get("stock_quantity", 0)
+            category = product.get("category", "Unknown")
+            sku = product.get("sku", "N/A")
+
+            # Format price nicely
+            price_str = (
+                f"${price:.2f}" if currency == "USD" else f"{price:.2f} {currency}"
+            )
+
+            # Stock status indicator
+            stock_status = "🟢" if stock > 20 else "🟡" if stock > 5 else "🔴"
+
+            formatted += f"**{i}. {name}**\n"
+            formatted += f"   💰 Price: {price_str}\n"
+            formatted += f"   📦 Stock: {stock} {stock_status}\n"
+            formatted += f"   🏷️  Category: {category}\n"
+            formatted += f"   🔢 SKU: {sku}\n\n"
+
+        return formatted.strip()
+
+    def _format_customers(self, customers: list) -> str:
+        """Format customer list for user-friendly display."""
+        if not customers:
+            return "No customers found."
+
+        formatted = ""
+        for i, customer in enumerate(customers, 1):
+            name = customer.get("name", "Unknown Customer")
+            email = customer.get("email", "No email")
+            total_orders = customer.get("total_orders", 0)
+            created_at = customer.get("created_at", "")
+
+            # Format date nicely
+            if created_at:
+                try:
+                    from datetime import datetime
+
+                    date_obj = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    date_str = date_obj.strftime("%Y-%m-%d")
+                except Exception:
+                    date_str = created_at[:10] if len(created_at) >= 10 else created_at
+            else:
+                date_str = "Unknown"
+
+            formatted += f"**{i}. {name}**\n"
+            formatted += f"   📧 Email: {email}\n"
+            formatted += f"   🛒 Orders: {total_orders}\n"
+            formatted += f"   📅 Joined: {date_str}\n\n"
+
+        return formatted.strip()
+
+    def _format_orders(self, orders: list) -> str:
+        """Format order list for user-friendly display."""
+        if not orders:
+            return "No orders found."
+
+        formatted = ""
+        for i, order in enumerate(orders, 1):
+            order_id = order.get("id", "Unknown ID")
+            customer_name = order.get("customer_name", "Unknown Customer")
+            total = order.get("total_amount", 0)
+            currency = order.get("currency", "USD")
+            status = order.get("status", "Unknown")
+            created_at = order.get("created_at", "")
+
+            # Format price
+            price_str = (
+                f"${total:.2f}" if currency == "USD" else f"{total:.2f} {currency}"
+            )
+
+            # Status indicator
+            status_icon = (
+                "✅"
+                if status.lower() == "completed"
+                else "⏳"
+                if status.lower() == "pending"
+                else "📋"
+            )
+
+            # Format date
+            if created_at:
+                try:
+                    from datetime import datetime
+
+                    date_obj = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    date_str = date_obj.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    date_str = created_at[:16] if len(created_at) >= 16 else created_at
+            else:
+                date_str = "Unknown"
+
+            formatted += f"**{i}. Order {order_id}**\n"
+            formatted += f"   👤 Customer: {customer_name}\n"
+            formatted += f"   💰 Total: {price_str}\n"
+            formatted += f"   {status_icon} Status: {status}\n"
+            formatted += f"   📅 Date: {date_str}\n\n"
+
+        return formatted.strip()
 
 
 # Demo function
