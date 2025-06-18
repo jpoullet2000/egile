@@ -268,6 +268,12 @@ class GrokChatbot {
     handleServerResponse(response) {
         this.hideTypingIndicator();
         
+        // Debug logging to see what we're receiving
+        if (response.type === 'pong') {
+            console.log('Received pong message (silently handled):', response);
+            return; // Early return to avoid any further processing
+        }
+        
         switch (response.type) {
             case 'system':
                 this.addMessage('system', response.message);
@@ -281,7 +287,12 @@ class GrokChatbot {
             case 'typing':
                 // Handle typing indicator if needed
                 break;
+            case 'pong':
+                // This should never be reached due to early return above
+                console.log('Pong case reached (should not happen)');
+                break;
             default:
+                console.log('Default case for message type:', response.type, response);
                 this.addMessage('ai', response.message || JSON.stringify(response));
         }
     }

@@ -10,7 +10,7 @@ A more intelligent and modular agent that can:
 5. Integrate with enhanced MCP server capabilities
 """
 
-import asyncio
+import json
 import logging
 import re
 import sys
@@ -19,15 +19,145 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from egile.agent import EcommerceAgent
+
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from egile.agent import EcommerceAgent
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("smart-agent")
+
+
+def robust_json_parse(data: Any, context: str = "data") -> Any:
+    """
+    Robustly parse JSON data that may come in various formats from the MCP server.
+
+    Args:
+        data: The data to parse (could be string, dict, object with attributes, etc.)
+        context: Context for error logging
+
+    Returns:
+        Parsed data structure or None if parsing fails
+    """
+    try:
+        # If already a dict or list, return as-is
+        if isinstance(data, (dict, list)):
+            return data
+
+        # If it's an object with a 'text' attribute
+        if hasattr(data, "text"):
+            text_content = data.text
+        # If it's a dict with 'text' key
+        elif isinstance(data, dict) and "text" in data:
+            text_content = data["text"]
+        # Otherwise convert to string
+        else:
+            text_content = str(data)
+
+        # If the text content is already a dict or list, return it
+        if isinstance(text_content, (dict, list)):
+            return text_content
+
+        # Try to parse as JSON
+        if isinstance(text_content, str):
+            # Clean up common JSON issues
+            text_content = text_content.strip()
+
+            # Handle empty string
+            if not text_content:
+                logger.warning(f"Empty {context} received")
+                if (
+                    "search" in context
+                    or "products" in context
+                    or "customers" in context
+                    or "orders" in context
+                ):
+                    return []
+                return None
+
+            # Remove any leading/trailing quotes that might wrap the JSON
+            if text_content.startswith('"') and text_content.endswith('"'):
+                text_content = text_content[1:-1]
+                # Unescape quotes
+                text_content = text_content.replace('\\"', '"')
+
+            # Try direct parsing
+            try:
+                return json.loads(text_content)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON decode error for {context}: {e}")
+
+                # Try to extract JSON from response if it's wrapped in other text
+                json_match = re.search(r"(\[.*\]|\{.*\})", text_content, re.DOTALL)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+
+                # If it looks like a simple string that should be JSON, try to fix quotes
+                if text_content.startswith("{") or text_content.startswith("["):
+                    # Replace single quotes with double quotes (common issue)
+                    fixed_content = text_content.replace("'", '"')
+                    try:
+                        return json.loads(fixed_content)
+                    except json.JSONDecodeError:
+                        # Try more aggressive quote fixing for unquoted keys
+                        # Fix unquoted keys like {name: 'value'} -> {"name": "value"}
+                        import re as regex_module
+
+                        fixed_content = regex_module.sub(
+                            r"(\w+):", r'"\1":', text_content
+                        )
+                        fixed_content = fixed_content.replace("'", '"')
+                        try:
+                            return json.loads(fixed_content)
+                        except json.JSONDecodeError:
+                            pass
+
+                logger.warning(
+                    f"Could not parse {context} as JSON: {text_content[:100]}..."
+                )
+                # Try to return empty list for search results that should be lists
+                if (
+                    "search" in context
+                    or "products" in context
+                    or "customers" in context
+                    or "orders" in context
+                ):
+                    return []
+                return None
+
+        logger.warning(f"Unexpected data type for {context}: {type(text_content)}")
+        return None
+
+    except Exception as e:
+        logger.error(f"Error parsing {context}: {e}")
+        return None
+
+
+def extract_text_from_result(result_data: Any) -> str:
+    """
+    Extract text content from various result data formats.
+
+    Args:
+        result_data: The result data from MCP server
+
+    Returns:
+        Text content as string
+    """
+    try:
+        if hasattr(result_data, "text"):
+            return result_data.text
+        elif isinstance(result_data, dict) and "text" in result_data:
+            return result_data["text"]
+        else:
+            return str(result_data)
+    except Exception as e:
+        logger.error(f"Error extracting text from result: {e}")
+        return ""
 
 
 @dataclass
@@ -119,7 +249,7 @@ class SmartAgent:
             )
 
             # Analyze the request
-            intent = self._analyze_intent(user_input)
+            intent = await self._analyze_intent(user_input)
 
             # Handle different types of requests
             if intent["type"] == "simple_query":
@@ -152,7 +282,7 @@ class SmartAgent:
                 "type": "error",
             }
 
-    def _analyze_intent(self, user_input: str) -> Dict[str, Any]:
+    async def _analyze_intent(self, user_input: str) -> Dict[str, Any]:
         """Analyze user input to determine intent and extract parameters."""
         text = user_input.lower().strip()
 
@@ -209,12 +339,20 @@ class SmartAgent:
         # Check for simple queries
         for pattern in patterns["simple_queries"]:
             if re.search(pattern, text):
-                return self._extract_simple_query_details(user_input, text)
+                simple_intent = self._extract_simple_query_details(user_input, text)
+                if simple_intent is not None:
+                    return simple_intent
+                # If extract_simple_query_details returns None, continue to LLM classification
 
         # Check for help requests
         for pattern in patterns["help_requests"]:
             if re.search(pattern, text):
                 return {"type": "help_request", "text": text, "original": user_input}
+
+        # If no clear pattern match or ambiguous case, try LLM-based intent classification
+        llm_intent = await self._classify_intent_with_llm(user_input)
+        if llm_intent and llm_intent.get("type") != "unknown":
+            return llm_intent
 
         # Default to unknown
         return {"type": "unknown", "text": text, "original": user_input}
@@ -268,7 +406,6 @@ class SmartAgent:
 
     def _extract_simple_query_details(self, original: str, text: str) -> Dict[str, Any]:
         """Extract details for simple queries."""
-        import re
 
         # Check for low stock queries first
         if ("low" in text and "stock" in text) or ("stock" in text and "level" in text):
@@ -278,22 +415,7 @@ class SmartAgent:
                 "original": original,
             }
 
-        # Check for customer creation patterns (enhanced)
-        customer_patterns = [
-            r"(create|add|new|register).*(customer|client|user)",
-            r"^customer\s+[A-Z][a-z]+\s+[A-Z][a-z]+",  # "customer John Doe"
-            r"(customer|client).*(name|email|phone|address)",
-            r"[A-Za-z]+\s+[A-Za-z]+.*@.*\.(com|org|net)",  # Name + email pattern
-            r"(john|jane|bob|alice|mike|sarah|david|mary).*@.*\.(com|org|net)",  # Common names + email
-        ]
-
-        for pattern in customer_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                return {
-                    "type": "simple_query",
-                    "action": "create_customer",
-                    "original": original,
-                }
+        # Skip the broad customer patterns here - let the create/add logic handle it more precisely
 
         if text.startswith("show") or text.startswith("list"):
             if "product" in text:
@@ -315,18 +437,52 @@ class SmartAgent:
                     "original": original,
                 }
         elif text.startswith("create") or text.startswith("add"):
-            if "product" in text:
+            # Check for order creation first (higher priority)
+            if "order" in text:
+                return {
+                    "type": "simple_query",
+                    "action": "create_order",
+                    "original": original,
+                }
+            elif "product" in text:
                 return {
                     "type": "simple_query",
                     "action": "create_product",
                     "original": original,
                 }
-            elif "customer" in text:
-                return {
-                    "type": "simple_query",
-                    "action": "create_customer",
-                    "original": original,
-                }
+            elif ("customer" in text or "client" in text) and "order" not in text:
+                # Only route to customer creation if it's clearly about customer creation
+                # and NOT about creating an order
+                import re
+
+                explicit_customer_patterns = [
+                    r"(create|add|register|signup|sign up).*(customer|client|user)(?!\s*(?:order|for))",
+                    r"^customer\s+[A-Z][a-z]+\s+[A-Z][a-z]+",  # "customer John Doe"
+                    r"(new|register)\s+(customer|client)",
+                ]
+
+                if any(
+                    re.search(pattern, text, re.IGNORECASE)
+                    for pattern in explicit_customer_patterns
+                ):
+                    return {
+                        "type": "simple_query",
+                        "action": "create_customer",
+                        "original": original,
+                    }
+                else:
+                    # Not clearly customer creation - use LLM
+                    logger.info(
+                        f"Customer-related but ambiguous request, deferring to LLM: {original}"
+                    )
+                    return None
+            else:
+                # Ambiguous case - use LLM to resolve
+                logger.info(
+                    f"Ambiguous create/add request, deferring to LLM: {original}"
+                )
+                # Return None to trigger LLM classification
+                return None
         elif text.startswith("search") or text.startswith("find"):
             query = original.split(maxsplit=1)[1] if len(original.split()) > 1 else ""
             return {
@@ -346,8 +502,6 @@ class SmartAgent:
             if action == "list_products":
                 result = await self.ecommerce_agent.get_all_products()
                 if result.success:
-                    import json
-
                     # Debug: Log the actual result structure
                     logger.info(f"Result data structure: {result.data}")
 
@@ -360,18 +514,13 @@ class SmartAgent:
                                 # Data is already parsed
                                 products = result.data
                             else:
-                                # Handle text content structure
-                                if hasattr(result.data[0], "text"):
-                                    products_text = result.data[0].text
-                                elif (
-                                    isinstance(result.data[0], dict)
-                                    and "text" in result.data[0]
-                                ):
-                                    products_text = result.data[0]["text"]
-                                else:
-                                    products_text = str(result.data[0])
-
-                                products = json.loads(products_text)
+                                # Use robust JSON parsing
+                                products = robust_json_parse(result.data[0], "products")
+                                if products is None:
+                                    return {
+                                        "success": False,
+                                        "message": "Error parsing product data from server.",
+                                    }
 
                             # Format the products nicely
                             formatted_products = self._format_products(products[:10])
@@ -387,16 +536,11 @@ class SmartAgent:
                                 "success": False,
                                 "message": "No product data received from server.",
                             }
-                    except (
-                        json.JSONDecodeError,
-                        KeyError,
-                        AttributeError,
-                        IndexError,
-                    ) as e:
-                        logger.error(f"Error parsing product data: {e}")
+                    except Exception as e:
+                        logger.error(f"Error processing product data: {e}")
                         return {
                             "success": False,
-                            "message": f"Error parsing product data: {str(e)}",
+                            "message": f"Error processing product data: {str(e)}",
                         }
                 else:
                     return {
@@ -418,18 +562,15 @@ class SmartAgent:
                                 # Data is already parsed
                                 customers = result.data
                             else:
-                                # Handle text content structure
-                                if hasattr(result.data[0], "text"):
-                                    customers_text = result.data[0].text
-                                elif (
-                                    isinstance(result.data[0], dict)
-                                    and "text" in result.data[0]
-                                ):
-                                    customers_text = result.data[0]["text"]
-                                else:
-                                    customers_text = str(result.data[0])
-
-                                customers = json.loads(customers_text)
+                                # Use robust JSON parsing
+                                customers = robust_json_parse(
+                                    result.data[0], "customers"
+                                )
+                                if customers is None:
+                                    return {
+                                        "success": False,
+                                        "message": "Error parsing customer data from server.",
+                                    }
 
                             # Format the customers nicely
                             formatted_customers = self._format_customers(customers[:10])
@@ -476,18 +617,13 @@ class SmartAgent:
                                 # Data is already parsed
                                 orders = result.data
                             else:
-                                # Handle text content structure
-                                if hasattr(result.data[0], "text"):
-                                    orders_text = result.data[0].text
-                                elif (
-                                    isinstance(result.data[0], dict)
-                                    and "text" in result.data[0]
-                                ):
-                                    orders_text = result.data[0]["text"]
-                                else:
-                                    orders_text = str(result.data[0])
-
-                                orders = json.loads(orders_text)
+                                # Use robust JSON parsing
+                                orders = robust_json_parse(result.data[0], "orders")
+                                if orders is None:
+                                    return {
+                                        "success": False,
+                                        "message": "Error parsing order data from server.",
+                                    }
 
                             # Enhance orders with customer information
                             enhanced_orders = (
@@ -549,18 +685,15 @@ class SmartAgent:
                                 # Data is already parsed
                                 products = result.data
                             else:
-                                # Handle text content structure
-                                if hasattr(result.data[0], "text"):
-                                    products_text = result.data[0].text
-                                elif (
-                                    isinstance(result.data[0], dict)
-                                    and "text" in result.data[0]
-                                ):
-                                    products_text = result.data[0]["text"]
-                                else:
-                                    products_text = str(result.data[0])
-
-                                products = json.loads(products_text)
+                                # Use robust JSON parsing
+                                products = robust_json_parse(
+                                    result.data[0], "search_products"
+                                )
+                                if products is None:
+                                    return {
+                                        "success": False,
+                                        "message": "Error parsing product search results from server.",
+                                    }
 
                             # Format the search results
                             if products:
@@ -620,18 +753,15 @@ class SmartAgent:
                                 # Data is already parsed
                                 products = result.data
                             else:
-                                # Handle text content structure
-                                if hasattr(result.data[0], "text"):
-                                    products_text = result.data[0].text
-                                elif (
-                                    isinstance(result.data[0], dict)
-                                    and "text" in result.data[0]
-                                ):
-                                    products_text = result.data[0]["text"]
-                                else:
-                                    products_text = str(result.data[0])
-
-                                products = json.loads(products_text)
+                                # Use robust JSON parsing
+                                products = robust_json_parse(
+                                    result.data[0], "low_stock_products"
+                                )
+                                if products is None:
+                                    return {
+                                        "success": False,
+                                        "message": "Error parsing low stock product data from server.",
+                                    }
 
                             if products:
                                 # Format the low stock products nicely
@@ -675,19 +805,24 @@ class SmartAgent:
                     }
 
             elif action == "create_product":
-                return {
-                    "success": True,
-                    "message": "To create a product, I need: name, description, price, SKU, category, and stock quantity. Please provide these details.",
-                    "type": "needs_input",
-                    "required_fields": [
-                        "name",
-                        "description",
-                        "price",
-                        "sku",
-                        "category",
-                        "stock_quantity",
-                    ],
-                }
+                # Check if we have the required parameters
+                params = intent.get("parameters", {})
+
+                # Add the original text for natural language parsing
+                params["original_text"] = intent.get("original", "")
+
+                # Try to parse product details from natural language
+                parsed_info = await self._parse_product_from_text(
+                    params["original_text"]
+                )
+
+                # Check if we got multiple products (list) or single product (dict)
+                if isinstance(parsed_info, list):
+                    # Handle multiple products
+                    return await self._handle_multiple_products(parsed_info)
+                else:
+                    # Handle single product
+                    return await self._handle_single_product(parsed_info, params)
 
             elif action == "create_customer":
                 # Check if we have the required parameters
@@ -743,21 +878,11 @@ class SmartAgent:
                                     isinstance(response_data, list)
                                     and len(response_data) > 0
                                 ):
-                                    if (
-                                        isinstance(response_data[0], dict)
-                                        and "text" in response_data[0]
-                                    ):
-                                        # Standard MCP response format
-                                        text_content = response_data[0]["text"]
-                                        if isinstance(text_content, str):
-                                            customer_data = json.loads(text_content)
-                                        else:
-                                            customer_data = text_content
-                                    elif isinstance(response_data[0], dict):
-                                        # Direct dict response
-                                        customer_data = response_data[0]
-                                    else:
-                                        # Fallback
+                                    # Use robust JSON parsing
+                                    customer_data = robust_json_parse(
+                                        response_data[0], "create_customer"
+                                    )
+                                    if customer_data is None:
                                         customer_data = {"id": "unknown"}
                                 else:
                                     customer_data = {"id": "unknown"}
@@ -795,6 +920,37 @@ class SmartAgent:
                             "message": f"Error creating customer: {str(e)}",
                             "type": "error",
                         }
+
+            elif action == "create_order":
+                # Parse order information from the original text
+                original_text = intent.get("original", "")
+                order_info = await self._parse_order_from_text(original_text)
+
+                # Check if we have the required information
+                if not order_info.get("customer_name") and not order_info.get(
+                    "customer_email"
+                ):
+                    return {
+                        "success": True,
+                        "message": "To create an order, I need a customer name or email, and product information. "
+                        + f"From your message: '{original_text}'. "
+                        + "Please provide the customer email and specify which products and quantities you want to order.",
+                        "type": "needs_input",
+                        "required_fields": ["customer_email", "products"],
+                    }
+
+                if not order_info.get("products"):
+                    return {
+                        "success": True,
+                        "message": "I found the customer information, but I need to know which products to order. "
+                        + "Please specify the product name(s) and quantity(ies).",
+                        "type": "needs_input",
+                        "required_fields": ["products"],
+                        "customer_info": order_info,
+                    }
+
+                # Create the order
+                return await self._create_order_with_info(order_info)
 
             else:
                 return {
@@ -1994,6 +2150,388 @@ Just tell me what you'd like to accomplish in natural language!
                 "type": "error",
             }
 
+    async def _parse_product_from_text(self, text: str) -> Dict[str, str]:
+        """Parse product information from natural language text using LLM (XAI/Grok preferred, OpenAI fallback)."""
+        try:
+            import os
+
+            logger.info(f"Parsing product text with LLM: {text}")
+
+            # Check for available API keys (prefer XAI over OpenAI)
+            xai_api_key = os.getenv("XAI_API_KEY")
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+
+            if not xai_api_key and not openai_api_key:
+                logger.warning(
+                    "No XAI or OpenAI API key found, falling back to pattern matching"
+                )
+                return self._fallback_parse_product(text)
+
+            # Create a structured prompt for product parsing
+            prompt = f"""
+You are a product data extraction expert. Parse the following text and extract product information.
+
+Text to parse: "{text}"
+
+Extract the following fields if present in the text:
+- name: The product name
+- description: Product description 
+- price: Price in dollars (number only, no $ symbol)
+- sku: Product SKU/code
+- category: Product category
+- stock_quantity: Stock quantity (number only)
+
+Respond with valid JSON only, no other text. If a field is not found, omit it from the response.
+Example format:
+{{
+    "name": "pen",
+    "description": "this is a pen", 
+    "price": "2",
+    "sku": "pen-5inches",
+    "category": "bureautic",
+    "stock_quantity": "10"
+}}
+"""
+
+            # Try XAI/Grok first (preferred)
+            if xai_api_key:
+                try:
+                    from openai import AsyncOpenAI
+
+                    logger.info("Using XAI/Grok for product parsing")
+                    client = AsyncOpenAI(
+                        api_key=xai_api_key, base_url="https://api.x.ai/v1"
+                    )
+
+                    # Try different Grok model names in order of preference
+                    grok_models = [
+                        "grok-3",
+                        "grok-2-1212",
+                        "grok-2",
+                        "grok-beta",
+                        "grok-1",
+                    ]
+
+                    for model_name in grok_models:
+                        try:
+                            response = await client.chat.completions.create(
+                                model=model_name,
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": "You are a helpful assistant that extracts product information from text and responds only with valid JSON.",
+                                    },
+                                    {"role": "user", "content": prompt},
+                                ],
+                                temperature=0.1,
+                                max_tokens=200,
+                            )
+
+                            # If we get here, the model worked
+                            logger.info(f"Successfully used XAI model: {model_name}")
+
+                            # Parse the LLM response
+                            llm_output = response.choices[0].message.content.strip()
+                            logger.info(f"XAI/Grok response: {llm_output}")
+
+                            parsed = self._parse_llm_response(llm_output)
+                            if parsed:
+                                logger.info(
+                                    f"Successfully parsed product info with XAI/Grok: {parsed}"
+                                )
+                                return parsed
+                            break
+
+                        except Exception as model_error:
+                            logger.warning(
+                                f"XAI model {model_name} failed: {model_error}"
+                            )
+                            continue
+
+                    # If no models worked, log and continue to OpenAI fallback
+                    logger.warning("All XAI/Grok models failed, trying OpenAI...")
+
+                except Exception as e:
+                    logger.error(f"Error with XAI/Grok setup: {e}")
+                    # Continue to try OpenAI if available
+
+            # Try OpenAI if XAI failed or isn't available
+            if openai_api_key:
+                try:
+                    from openai import AsyncOpenAI
+
+                    logger.info("Using OpenAI for product parsing")
+                    client = AsyncOpenAI(api_key=openai_api_key)
+
+                    response = await client.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are a helpful assistant that extracts product information from text and responds only with valid JSON.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.1,
+                        max_tokens=200,
+                    )
+
+                    # Parse the LLM response
+                    llm_output = response.choices[0].message.content.strip()
+                    logger.info(f"OpenAI response: {llm_output}")
+
+                    parsed = self._parse_llm_response(llm_output)
+                    if parsed:
+                        logger.info(
+                            f"Successfully parsed product info with OpenAI: {parsed}"
+                        )
+                        return parsed
+
+                except Exception as e:
+                    logger.error(f"Error calling OpenAI API: {e}")
+
+            # If all LLM attempts failed, fall back to pattern matching
+            logger.warning("All LLM attempts failed, falling back to pattern matching")
+            return self._fallback_parse_product(text)
+
+        except ImportError as e:
+            logger.error(f"OpenAI library not available: {e}")
+            return self._fallback_parse_product(text)
+        except Exception as e:
+            logger.error(f"Error in LLM product parsing: {e}")
+            return self._fallback_parse_product(text)
+
+    def _parse_llm_response(self, llm_output: str) -> Dict[str, str]:
+        """Parse and validate LLM response JSON."""
+        try:
+            # First try direct JSON parsing
+            parsed = json.loads(llm_output)
+            return parsed
+        except json.JSONDecodeError:
+            # Try to extract JSON from response if it's wrapped in other text
+            json_match = re.search(r"\{.*\}", llm_output, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group())
+                    return parsed
+                except json.JSONDecodeError:
+                    pass
+
+        logger.error(f"Could not parse LLM response as JSON: {llm_output}")
+        return {}
+
+    def _parse_structured_format(self, text: str) -> Dict[str, str]:
+        """Parse comma-separated format like 'pen, this is a pen, $2, pen-5inches, bureautic, 10'."""
+        import re
+
+        parsed = {}
+
+        # Split by comma and clean up
+        parts = [part.strip() for part in text.split(",")]
+
+        if len(parts) >= 6:
+            # Standard format: name, description, price, sku, category, stock
+            parsed["name"] = (
+                parts[0].replace("create", "").replace("product", "").strip()
+            )
+            parsed["description"] = parts[1]
+
+            # Extract price (remove $ if present)
+            price_part = parts[2].replace("$", "").strip()
+            if price_part and re.match(r"^\d+(\.\d{2})?$", price_part):
+                parsed["price"] = price_part
+
+            parsed["sku"] = parts[3]
+            parsed["category"] = parts[4]
+
+            # Extract stock quantity
+            stock_part = parts[5].strip()
+            if stock_part.isdigit():
+                parsed["stock_quantity"] = stock_part
+        elif len(parts) >= 3:
+            # Partial format, try to intelligently assign
+            idx = 0
+
+            # First part is likely the name
+            name_part = parts[idx].replace("create", "").replace("product", "").strip()
+            if name_part:
+                parsed["name"] = name_part
+                idx += 1
+
+            # Look for description (non-price, non-numeric parts)
+            while idx < len(parts):
+                part = parts[idx].strip()
+                if not part.startswith("$") and not part.isdigit() and "-" not in part:
+                    parsed["description"] = part
+                    idx += 1
+                    break
+                idx += 1
+
+            # Look for price
+            for i, part in enumerate(parts):
+                if part.strip().startswith("$") or re.match(
+                    r"^\$?\d+(\.\d{2})?$", part.strip()
+                ):
+                    price = part.strip().replace("$", "")
+                    if re.match(r"^\d+(\.\d{2})?$", price):
+                        parsed["price"] = price
+                    break
+
+            # Look for SKU (contains hyphen)
+            for part in parts:
+                if "-" in part.strip() and len(part.strip()) > 3:
+                    parsed["sku"] = part.strip()
+                    break
+
+            # Look for stock (pure numbers)
+            for part in reversed(parts):  # Start from end
+                if part.strip().isdigit() and int(part.strip()) > 0:
+                    parsed["stock_quantity"] = part.strip()
+                    break
+
+            # Remaining parts might be category
+            for part in parts:
+                part = part.strip()
+                if (
+                    part not in [parsed.get("name"), parsed.get("description")]
+                    and not part.startswith("$")
+                    and not part.isdigit()
+                    and "-" not in part
+                    and len(part) > 2
+                ):
+                    parsed["category"] = part
+                    break
+
+        return parsed
+
+    def _parse_flexible_format(self, text: str) -> Dict[str, str]:
+        """Parse more flexible natural language format."""
+        import re
+
+        parsed = {}
+
+        # Look for product name at the beginning
+        name_patterns = [
+            r"(?:create|add|new)\s+(?:product\s+)?([a-zA-Z][a-zA-Z0-9\s\-_]+?)(?:\s*,|\s+with|\s+this)",
+            r"^([a-zA-Z][a-zA-Z0-9\s\-_]+?)(?:\s*,|\s+this\s+is|\s+description)",
+        ]
+
+        for pattern in name_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                exclude_words = {"product", "item", "create", "add", "new"}
+                if name.lower() not in exclude_words:
+                    parsed["name"] = name
+                    break
+
+        # Look for "this is a..." descriptions
+        desc_match = re.search(r"this\s+is\s+(?:a\s+)?([^,\$]+)", text, re.IGNORECASE)
+        if desc_match:
+            parsed["description"] = desc_match.group(1).strip()
+
+        # Look for price
+        price_match = re.search(r"\$(\d+(?:\.\d{2})?)", text)
+        if price_match:
+            parsed["price"] = price_match.group(1)
+
+        # Look for SKU (hyphenated codes)
+        sku_match = re.search(r"\b([a-zA-Z]+-[a-zA-Z0-9]+)\b", text)
+        if sku_match:
+            parsed["sku"] = sku_match.group(1)
+
+        # Look for common categories
+        categories = [
+            "bureautic",
+            "kitchen",
+            "electronics",
+            "clothing",
+            "books",
+            "sports",
+            "toys",
+            "home",
+            "garden",
+            "office",
+        ]
+        for category in categories:
+            if category in text.lower():
+                parsed["category"] = category
+                break
+
+        # Look for stock at the end
+        stock_match = re.search(r"\b(\d+)\s*$", text)
+        if stock_match:
+            parsed["stock_quantity"] = stock_match.group(1)
+
+        return parsed
+
+    def _fallback_parse_product(self, text: str) -> Dict[str, str]:
+        """Fallback parsing using simple pattern matching."""
+        import re
+
+        parsed = {}
+
+        # Simple comma-separated parsing for format like "pen, this is a pen, $2, pen-5inches, bureautic, 10"
+        parts = [part.strip() for part in text.split(",")]
+
+        if len(parts) >= 6:
+            # Assume format: name, description, price, sku, category, stock
+            parsed["name"] = parts[0]
+            parsed["description"] = parts[1]
+
+            # Extract price (remove $ if present)
+            price_part = parts[2].replace("$", "").strip()
+            if price_part and price_part.replace(".", "").isdigit():
+                parsed["price"] = price_part
+
+            parsed["sku"] = parts[3]
+            parsed["category"] = parts[4]
+
+            # Extract stock quantity
+            stock_part = parts[5].strip()
+            if stock_part.isdigit():
+                parsed["stock_quantity"] = stock_part
+
+        # If comma-separated didn't work, try some basic patterns
+        if not parsed:
+            # Look for price pattern
+            price_match = re.search(r"\$(\d+(?:\.\d{2})?)", text)
+            if price_match:
+                parsed["price"] = price_match.group(1)
+
+            # Look for hyphenated SKU
+            sku_match = re.search(r"\b([a-zA-Z]+-[a-zA-Z0-9]+)\b", text)
+            if sku_match:
+                parsed["sku"] = sku_match.group(1)
+
+            # Look for numbers at end (stock)
+            stock_match = re.search(r"\b(\d+)\s*$", text)
+            if stock_match:
+                parsed["stock_quantity"] = stock_match.group(1)
+
+        return parsed
+
+    def _format_parsed_product_info(self, parsed_info: Dict[str, str]) -> str:
+        """Format parsed product information for display."""
+        if not parsed_info:
+            return "no product information detected"
+
+        formatted = []
+        if parsed_info.get("name"):
+            formatted.append(f"Name: {parsed_info['name']}")
+        if parsed_info.get("description"):
+            formatted.append(f"Description: {parsed_info['description']}")
+        if parsed_info.get("price"):
+            formatted.append(f"Price: ${parsed_info['price']}")
+        if parsed_info.get("sku"):
+            formatted.append(f"SKU: {parsed_info['sku']}")
+        if parsed_info.get("category"):
+            formatted.append(f"Category: {parsed_info['category']}")
+        if parsed_info.get("stock_quantity"):
+            formatted.append(f"Stock: {parsed_info['stock_quantity']} units")
+
+        return ", ".join(formatted) if formatted else "no valid product information"
+
     def _parse_customer_from_text(self, text: str) -> Dict[str, str]:
         """Parse customer information from natural language text."""
         import re
@@ -2046,7 +2584,7 @@ Just tell me what you'd like to accomplish in natural language!
             # "first name John last name Doe"
             r"first\s*name\s*[:\s]*([A-Z][a-z]+).*?last\s*name\s*[:\s]*([A-Z][a-z]+)",
             # "John Doe" at the beginning of text (capitalized words that might be names)
-            r"^\s*([A-Z][a-z]+)\s+([A-Z][a-z]+)",
+            r"^\s*([A-Z][a-z]+)\s+([A-Z][a-z]+)\b",
             # "John Doe" followed by email
             r"\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\s+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}",
         ]
@@ -2166,20 +2704,13 @@ Just tell me what you'd like to accomplish in natural language!
                         customer_id, "id"
                     )
                     if customer_result.success and customer_result.data:
-                        import json
-
-                        # Parse customer data
-                        if hasattr(customer_result.data[0], "text"):
-                            customer_text = customer_result.data[0].text
-                        elif (
-                            isinstance(customer_result.data[0], dict)
-                            and "text" in customer_result.data[0]
-                        ):
-                            customer_text = customer_result.data[0]["text"]
-                        else:
-                            customer_text = str(customer_result.data[0])
-
-                        customer_data = json.loads(customer_text)
+                        # Use robust JSON parsing
+                        customer_data = robust_json_parse(
+                            customer_result.data[0], "customer_info"
+                        )
+                        if customer_data is None:
+                            enhanced_order["customer_name"] = f"Customer {customer_id}"
+                            continue
 
                         # Build customer name
                         first_name = customer_data.get("first_name", "")
@@ -2203,51 +2734,917 @@ Just tell me what you'd like to accomplish in natural language!
 
         return enhanced_orders
 
-    # ... existing methods ...
+    async def _handle_single_product(
+        self, parsed_info: Dict[str, str], params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Handle creation of a single product."""
+        # Merge parsed info with any explicitly provided parameters
+        for key, value in parsed_info.items():
+            if value and not params.get(key):
+                params[key] = value
 
+        required_fields = [
+            "name",
+            "description",
+            "price",
+            "sku",
+            "category",
+            "stock_quantity",
+        ]
+        missing_fields = [field for field in required_fields if not params.get(field)]
 
-# Demo function
-async def demo_smart_agent():
-    """Demonstrate the Smart Agent capabilities."""
-    agent = SmartAgent()
+        if missing_fields:
+            return {
+                "success": True,
+                "message": "To create a product, I need: name, description, price, SKU, category, and stock quantity. "
+                + f"From your message, I found: {self._format_parsed_product_info(parsed_info)}. "
+                + f"Still missing: {', '.join(missing_fields)}. "
+                + "Please provide the missing information.",
+                "type": "needs_input",
+                "required_fields": missing_fields,
+                "parsed_info": parsed_info,
+            }
+        else:
+            # We have all required fields, create the product
+            return await self._create_single_product(params)
 
-    try:
-        await agent.start()
+    async def _handle_multiple_products(
+        self, products_list: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """Handle creation of multiple products."""
+        if not products_list:
+            return {
+                "success": False,
+                "message": "No product information found in your request.",
+                "type": "error",
+            }
 
-        print("🤖 Smart E-commerce Agent Demo")
-        print("=" * 50)
-
-        test_requests = [
-            "setup demo store with 15 products",
-            "yes",
-            "show all products",
-            "generate analytics report",
-            "yes",
+        required_fields = [
+            "name",
+            "description",
+            "price",
+            "sku",
+            "category",
+            "stock_quantity",
         ]
 
-        for request in test_requests:
-            print(f"\n👤 User: {request}")
-            response = await agent.process_request(request)
-            print(f"🤖 Agent: {response['message']}")
+        # Check if all products have required fields
+        incomplete_products = []
+        complete_products = []
 
-            # Show additional data for certain responses
-            if response.get("type") == "product_list":
-                products = response.get("data", [])
-                if products:
-                    print("   Sample products:")
-                    for product in products[:3]:
-                        print(
-                            f"   • {product.get('name', 'Unknown')} - ${product.get('price', 0):.2f}"
+        for i, product in enumerate(products_list):
+            missing_fields = [
+                field for field in required_fields if not product.get(field)
+            ]
+            if missing_fields:
+                incomplete_products.append(
+                    {"index": i + 1, "product": product, "missing": missing_fields}
+                )
+            else:
+                complete_products.append(product)
+
+        if incomplete_products:
+            # Some products are missing information
+            missing_info = []
+            for item in incomplete_products:
+                product_name = item["product"].get("name", f"Product {item['index']}")
+                missing_info.append(
+                    f"{product_name}: missing {', '.join(item['missing'])}"
+                )
+
+            return {
+                "success": True,
+                "message": f"I found {len(products_list)} products to create, but some are missing information:\n\n"
+                + "\n".join(missing_info)
+                + "\n\nPlease provide the missing information so I can create all products.",
+                "type": "needs_input",
+                "parsed_products": products_list,
+                "incomplete_products": incomplete_products,
+                "complete_products": complete_products,
+            }
+        else:
+            # All products have complete information, create them
+            return await self._create_multiple_products(complete_products)
+
+    async def _create_single_product(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a single product."""
+        try:
+            result = await self.ecommerce_agent.create_product(
+                name=params["name"],
+                description=params["description"],
+                price=float(params["price"]),
+                sku=params["sku"],
+                category=params["category"],
+                stock_quantity=int(params["stock_quantity"]),
+            )
+
+            if result.success:
+                return {
+                    "success": True,
+                    "message": f"Successfully created product: {params['name']} (SKU: {params['sku']}) in {params['category']} category. "
+                    + f"Price: ${params['price']}, Stock: {params['stock_quantity']} units.",
+                    "type": "product_created",
+                    "data": params,
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Failed to create product: {result.error}",
+                    "type": "creation_failed",
+                }
+        except Exception as e:
+            logger.error(f"Error creating product: {e}")
+            return {
+                "success": False,
+                "message": f"Error creating product: {str(e)}",
+                "type": "error",
+            }
+
+    async def _create_multiple_products(
+        self, products: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """Create multiple products."""
+        created_products = []
+        failed_products = []
+
+        for product in products:
+            try:
+                result = await self.ecommerce_agent.create_product(
+                    name=product["name"],
+                    description=product["description"],
+                    price=float(product["price"]),
+                    sku=product["sku"],
+                    category=product["category"],
+                    stock_quantity=int(product["stock_quantity"]),
+                )
+
+                if result.success:
+                    created_products.append(product)
+                else:
+                    failed_products.append({"product": product, "error": result.error})
+            except Exception as e:
+                logger.error(
+                    f"Error creating product {product.get('name', 'unknown')}: {e}"
+                )
+                failed_products.append({"product": product, "error": str(e)})
+
+        # Build response message
+        if created_products and not failed_products:
+            # All products created successfully
+            return {
+                "success": True,
+                "message": f"Successfully created {len(created_products)} products:\n\n"
+                + "\n".join(
+                    [
+                        f"• {p['name']} (SKU: {p['sku']}) - ${p['price']} in {p['category']}"
+                        for p in created_products
+                    ]
+                ),
+                "type": "multiple_products_created",
+                "created_products": created_products,
+                "total_created": len(created_products),
+            }
+        elif created_products and failed_products:
+            # Some products created, some failed
+            failure_info = [
+                f"• {f['product']['name']}: {f['error']}" for f in failed_products
+            ]
+
+            return {
+                "success": True,  # Partial success
+                "message": f"Created {len(created_products)} products successfully:\n"
+                + "\n".join(
+                    [f"• {p['name']} (SKU: {p['sku']})" for p in created_products]
+                )
+                + f"\n\nFailed to create {len(failed_products)} products:\n"
+                + "\n".join(failure_info),
+                "type": "partial_products_created",
+                "created_products": created_products,
+                "failed_products": failed_products,
+                "total_created": len(created_products),
+                "total_failed": len(failed_products),
+            }
+        else:
+            # All products failed
+            failure_info = [
+                f"• {f['product']['name']}: {f['error']}" for f in failed_products
+            ]
+            return {
+                "success": False,
+                "message": f"Failed to create all {len(failed_products)} products:\n"
+                + "\n".join(failure_info),
+                "type": "multiple_products_failed",
+                "failed_products": failed_products,
+                "total_failed": len(failed_products),
+            }
+
+    async def _parse_order_from_text(self, text: str) -> Dict[str, Any]:
+        """Parse order information from natural language text."""
+        import re
+
+        order_info = {}
+
+        # Try to extract customer name - look for patterns like "for [Name Name]"
+        name_patterns = [
+            r"(?:for|from|customer)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)",
+            r"^.*?\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b.*?(?:order|wants|needs)",
+        ]
+
+        for pattern in name_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                full_name = match.group(1).strip()
+                name_parts = full_name.split()
+                if len(name_parts) >= 2:
+                    order_info["customer_name"] = full_name
+                    order_info["first_name"] = name_parts[0]
+                    order_info["last_name"] = " ".join(name_parts[1:])
+                break
+
+        # Extract email if present
+        email_match = re.search(
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text
+        )
+        if email_match:
+            order_info["customer_email"] = email_match.group(0)
+
+            # If no name was found yet, try to extract name from email
+            if "customer_name" not in order_info:
+                email_local = email_match.group(0).split("@")[0]
+                # Handle formats like "Eli.Gile", "eli_gile", "eliGile", etc.
+                if "." in email_local:
+                    parts = email_local.split(".")
+                    if len(parts) >= 2:
+                        first_name = parts[0].capitalize()
+                        last_name = parts[1].capitalize()
+                        order_info["customer_name"] = f"{first_name} {last_name}"
+                        order_info["first_name"] = first_name
+                        order_info["last_name"] = last_name
+                elif "_" in email_local:
+                    parts = email_local.split("_")
+                    if len(parts) >= 2:
+                        first_name = parts[0].capitalize()
+                        last_name = parts[1].capitalize()
+                        order_info["customer_name"] = f"{first_name} {last_name}"
+                        order_info["first_name"] = first_name
+                        order_info["last_name"] = last_name
+                else:
+                    # For camelCase or single names, use the local part as first name
+                    # and create a reasonable last name or use email as fallback
+                    order_info["customer_name"] = email_local.capitalize()
+                    order_info["first_name"] = email_local.capitalize()
+                    order_info["last_name"] = ""
+
+        # Extract product information - look for patterns like "2 pens", "5 laptops", etc.
+        product_patterns = [
+            # "2 pens", "5 laptops"
+            r"(\d+)\s+([a-zA-Z][a-zA-Z0-9\s\-_]*?)(?:\s|$|,|\.|!|\?)",
+            # "order 2 pens"
+            r"order\s+(\d+)\s+([a-zA-Z][a-zA-Z0-9\s\-_]*?)(?:\s|$|,|\.|!|\?)",
+        ]
+
+        products = []
+        for pattern in product_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                quantity = int(match.group(1))
+                product_name = match.group(2).strip()
+
+                # Clean up product name - remove common words
+                exclude_words = {
+                    "for",
+                    "the",
+                    "a",
+                    "an",
+                    "and",
+                    "of",
+                    "in",
+                    "on",
+                    "at",
+                    "to",
+                    "from",
+                }
+                clean_name = " ".join(
+                    [
+                        word
+                        for word in product_name.split()
+                        if word.lower() not in exclude_words and len(word) > 1
+                    ]
+                )
+
+                if clean_name and quantity > 0:
+                    products.append({"name": clean_name, "quantity": quantity})
+
+        if products:
+            order_info["products"] = products
+
+        return order_info
+
+    async def _create_order_with_info(
+        self, order_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Create an order with the parsed information."""
+        try:
+            # First, find or create the customer
+            customer_info = await self._find_or_create_customer(order_info)
+            logger.info(f"Customer info result: {customer_info}")
+            if not customer_info.get("success"):
+                return customer_info
+
+            customer_id = customer_info["customer_id"]
+            logger.info(f"Using customer_id: '{customer_id}'")
+
+            # Find products and build order items
+            order_items = []
+            missing_products = []
+
+            for product_request in order_info["products"]:
+                product_name = product_request["name"]
+                quantity = product_request["quantity"]
+
+                # Search for the product
+                search_result = await self.ecommerce_agent.search_products(product_name)
+                logger.info(
+                    f"Product search for '{product_name}': success={search_result.success}, data={search_result.data}"
+                )
+
+                if (
+                    search_result.success
+                    and search_result.data
+                    and len(search_result.data) > 0
+                ):
+                    try:
+                        # Parse search results using robust JSON parsing
+                        if (
+                            isinstance(search_result.data, list)
+                            and len(search_result.data) > 0
+                        ):
+                            logger.info(
+                                f"Raw product data before parsing: {search_result.data[0]}"
+                            )
+                            products = robust_json_parse(
+                                search_result.data[0], f"product_search_{product_name}"
+                            )
+                            logger.info(f"Parsed products: {products}")
+
+                            # Handle both single product (dict) and multiple products (list)
+                            if isinstance(products, dict):
+                                # Single product returned
+                                product = products
+                                order_items.append(
+                                    {
+                                        "product_id": product["id"],
+                                        "quantity": quantity,
+                                        "price": float(product["price"]),
+                                    }
+                                )
+                            elif isinstance(products, list) and len(products) > 0:
+                                # Multiple products returned, use the first one
+                                product = products[0]
+                                order_items.append(
+                                    {
+                                        "product_id": product["id"],
+                                        "quantity": quantity,
+                                        "price": float(product["price"]),
+                                    }
+                                )
+                            else:
+                                logger.warning(
+                                    f"No products found in parsed result for '{product_name}'"
+                                )
+                                # Try singular form if plural didn't work
+                                if product_name.endswith("s") and len(product_name) > 1:
+                                    singular_name = product_name[:-1]
+                                    logger.info(
+                                        f"Trying singular form: '{singular_name}'"
+                                    )
+                                    singular_result = (
+                                        await self.ecommerce_agent.search_products(
+                                            singular_name
+                                        )
+                                    )
+                                    if (
+                                        singular_result.success
+                                        and singular_result.data
+                                        and isinstance(singular_result.data, list)
+                                        and len(singular_result.data) > 0
+                                    ):
+                                        singular_products = robust_json_parse(
+                                            singular_result.data[0],
+                                            f"product_search_{singular_name}",
+                                        )
+                                        if isinstance(singular_products, dict):
+                                            product = singular_products
+                                            order_items.append(
+                                                {
+                                                    "product_id": product["id"],
+                                                    "quantity": quantity,
+                                                    "price": float(product["price"]),
+                                                }
+                                            )
+                                        elif (
+                                            isinstance(singular_products, list)
+                                            and len(singular_products) > 0
+                                        ):
+                                            product = singular_products[0]
+                                            order_items.append(
+                                                {
+                                                    "product_id": product["id"],
+                                                    "quantity": quantity,
+                                                    "price": float(product["price"]),
+                                                }
+                                            )
+                                        else:
+                                            missing_products.append(product_name)
+                                    else:
+                                        missing_products.append(product_name)
+                                else:
+                                    missing_products.append(product_name)
+                        else:
+                            logger.warning(
+                                f"Invalid search result data structure for '{product_name}': {search_result.data}"
+                            )
+                            missing_products.append(product_name)
+                    except (KeyError, ValueError, TypeError) as e:
+                        logger.error(
+                            f"Error processing product search results for '{product_name}': {e}"
+                        )
+                        missing_products.append(product_name)
+                else:
+                    logger.warning(
+                        f"Product search failed for '{product_name}': success={search_result.success}, error={getattr(search_result, 'error', 'No error')}"
+                    )
+
+                    # Try singular form if plural didn't work
+                    if product_name.endswith("s") and len(product_name) > 1:
+                        singular_name = product_name[:-1]
+                        logger.info(f"Trying singular form: '{singular_name}'")
+                        singular_result = await self.ecommerce_agent.search_products(
+                            singular_name
                         )
 
-            await asyncio.sleep(1)
+                        if (
+                            singular_result.success
+                            and singular_result.data
+                            and len(singular_result.data) > 0
+                        ):
+                            try:
+                                singular_products = robust_json_parse(
+                                    singular_result.data[0],
+                                    f"product_search_{singular_name}",
+                                )
 
-        print("\n" + "=" * 50)
-        print("🎉 Demo completed!")
+                                if isinstance(singular_products, dict):
+                                    product = singular_products
+                                    order_items.append(
+                                        {
+                                            "product_id": product["id"],
+                                            "quantity": quantity,
+                                            "price": float(product["price"]),
+                                        }
+                                    )
+                                elif (
+                                    isinstance(singular_products, list)
+                                    and len(singular_products) > 0
+                                ):
+                                    product = singular_products[0]
+                                    order_items.append(
+                                        {
+                                            "product_id": product["id"],
+                                            "quantity": quantity,
+                                            "price": float(product["price"]),
+                                        }
+                                    )
+                                else:
+                                    missing_products.append(product_name)
+                            except Exception as e:
+                                logger.error(
+                                    f"Error parsing singular search result for '{singular_name}': {e}"
+                                )
+                                missing_products.append(product_name)
+                        else:
+                            missing_products.append(product_name)
+                    else:
+                        missing_products.append(product_name)
 
-    finally:
-        await agent.stop()
+            if missing_products:
+                return {
+                    "success": False,
+                    "message": f"Could not find the following products: {', '.join(missing_products)}. "
+                    + "Please check the product names and try again.",
+                    "type": "products_not_found",
+                    "missing_products": missing_products,
+                }
 
+            if not order_items:
+                return {
+                    "success": False,
+                    "message": "No valid products found for the order.",
+                    "type": "no_products",
+                }
 
-if __name__ == "__main__":
-    asyncio.run(demo_smart_agent())
+            # Create the order
+            logger.info(
+                f"Creating order with customer_id='{customer_id}' and {len(order_items)} items: {order_items}"
+            )
+            result = await self.ecommerce_agent.create_order(
+                customer_id=customer_id, items=order_items
+            )
+            logger.info(
+                f"Order creation result: success={result.success}, data={result.data}, error={getattr(result, 'error', 'None')}"
+            )
+
+            if result.success:
+                # Build success message
+                item_descriptions = []
+                for i, item in enumerate(order_items):
+                    product_name = order_info["products"][i]["name"]
+                    item_descriptions.append(f"{item['quantity']} x {product_name}")
+
+                customer_name = order_info.get(
+                    "customer_name", order_info.get("customer_email", "customer")
+                )
+
+                return {
+                    "success": True,
+                    "message": f"Successfully created order for {customer_name}:\n"
+                    + "\n".join([f"• {desc}" for desc in item_descriptions])
+                    + f"\n\nOrder total: ${sum(item['price'] * item['quantity'] for item in order_items):.2f}",
+                    "type": "order_created",
+                    "order_info": {
+                        "customer": customer_name,
+                        "items": item_descriptions,
+                        "total": sum(
+                            item["price"] * item["quantity"] for item in order_items
+                        ),
+                    },
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Failed to create order: {result.error}",
+                    "type": "order_creation_failed",
+                }
+
+        except Exception as e:
+            logger.error(f"Error creating order: {e}")
+            return {
+                "success": False,
+                "message": f"Error creating order: {str(e)}",
+                "type": "error",
+            }
+
+    async def _find_or_create_customer(
+        self, order_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Find existing customer or create a new one."""
+        try:
+            customer_email = order_info.get("customer_email")
+            customer_name = order_info.get("customer_name")
+
+            if customer_email:
+                # Try to find customer by email
+                search_result = await self.ecommerce_agent.get_customer(
+                    customer_email, "email"
+                )
+                if search_result.success and search_result.data:
+                    try:
+                        # Use robust JSON parsing
+                        customer_data = robust_json_parse(
+                            search_result.data[0], "existing_customer"
+                        )
+                        if customer_data is not None:
+                            return {
+                                "success": True,
+                                "customer_id": customer_data.get("id"),
+                                "found_existing": True,
+                            }
+                    except Exception as e:
+                        logger.debug(f"Customer not found by email: {e}")
+
+            # If customer not found by email, try to create a new one
+            if customer_name and customer_email:
+                first_name = order_info.get("first_name", customer_name.split()[0])
+                last_name = order_info.get(
+                    "last_name",
+                    " ".join(customer_name.split()[1:])
+                    if len(customer_name.split()) > 1
+                    else "",
+                )
+
+                create_result = await self.ecommerce_agent.create_customer(
+                    email=customer_email, first_name=first_name, last_name=last_name
+                )
+
+                logger.info(
+                    f"Customer creation result: success={create_result.success}, data={create_result.data}"
+                )
+
+                if create_result.success:
+                    try:
+                        # Check if we got an error message indicating duplicate email
+                        if (
+                            create_result.data
+                            and len(create_result.data) > 0
+                            and isinstance(create_result.data[0], str)
+                            and "UNIQUE constraint failed" in create_result.data[0]
+                        ):
+                            logger.info(
+                                "Customer already exists due to UNIQUE constraint, finding existing customer"
+                            )
+
+                            # Customer already exists, find it by listing all customers
+                            list_result = await self.ecommerce_agent.list_customers()
+                            logger.info(
+                                f"Listed customers for search: success={list_result.success}, data_length={len(list_result.data) if list_result.data else 0}"
+                            )
+
+                            if list_result.success and list_result.data:
+                                customers = robust_json_parse(
+                                    list_result.data[0], "all_customers_for_existing"
+                                )
+
+                                if customers and isinstance(customers, list):
+                                    # Find customer with matching email
+                                    for customer in customers:
+                                        if customer.get("email") == customer_email:
+                                            customer_id = customer.get("id")
+                                            logger.info(
+                                                f"Found existing customer: {customer.get('first_name', '')} {customer.get('last_name', '')} with ID: {customer_id}"
+                                            )
+                                            return {
+                                                "success": True,
+                                                "customer_id": customer_id,
+                                                "found_existing": True,
+                                            }
+
+                                    logger.warning(
+                                        f"Could not find customer with email {customer_email} in customer list"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Failed to parse customer list: {customers}"
+                                    )
+
+                            # If all else fails, try the direct search approach
+                            logger.info("Trying direct customer search as last resort")
+                            search_result = await self.ecommerce_agent.get_customer(
+                                customer_email, "email"
+                            )
+
+                            if search_result.success and search_result.data:
+                                existing_customer = robust_json_parse(
+                                    search_result.data[0], "existing_customer_direct"
+                                )
+
+                                if existing_customer and isinstance(
+                                    existing_customer, dict
+                                ):
+                                    customer_id = existing_customer.get("id")
+                                    if customer_id:
+                                        logger.info(
+                                            f"Found customer via direct search: {customer_id}"
+                                        )
+                                        return {
+                                            "success": True,
+                                            "customer_id": customer_id,
+                                            "found_existing": True,
+                                        }
+
+                        # Normal customer creation case (not a duplicate)
+                        if create_result.data and len(create_result.data) > 0:
+                            customer_data = robust_json_parse(
+                                create_result.data[0], "new_customer"
+                            )
+                            if customer_data is None:
+                                logger.error(
+                                    "Error parsing new customer data - using fallback"
+                                )
+                                # Use a fallback approach - generate a placeholder ID
+                                return {
+                                    "success": True,
+                                    "customer_id": f"customer_{customer_email.split('@')[0]}",
+                                    "created_new": True,
+                                }
+
+                            return {
+                                "success": True,
+                                "customer_id": customer_data.get(
+                                    "id", f"customer_{customer_email.split('@')[0]}"
+                                ),
+                                "created_new": True,
+                            }
+                        else:
+                            logger.warning("No customer data returned from creation")
+                            return {
+                                "success": True,
+                                "customer_id": f"customer_{customer_email.split('@')[0]}",
+                                "created_new": True,
+                            }
+                    except Exception as e:
+                        logger.error(f"Error parsing new customer data: {e}")
+                        return {
+                            "success": True,
+                            "customer_id": "new_customer",  # Fallback
+                            "created_new": True,
+                        }
+
+            # If we only have a name, ask for email
+            if customer_name and not customer_email:
+                return {
+                    "success": False,
+                    "message": f"I found the customer name '{customer_name}', but I need an email address to create or find the customer. "
+                    + "Please provide the customer's email address.",
+                    "type": "needs_email",
+                    "customer_name": customer_name,
+                }
+
+            return {
+                "success": False,
+                "message": "I need either a customer email address or both name and email to process the order.",
+                "type": "needs_customer_info",
+            }
+
+        except Exception as e:
+            logger.error(f"Error finding/creating customer: {e}")
+            return {
+                "success": False,
+                "message": f"Error processing customer information: {str(e)}",
+                "type": "error",
+            }
+
+    async def _classify_intent_with_llm(self, user_input: str) -> Dict[str, Any]:
+        """Use LLM to classify user intent when rule-based approach fails."""
+        try:
+            import os
+
+            # Check for available API keys (prefer XAI over OpenAI)
+            xai_api_key = os.getenv("XAI_API_KEY")
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+
+            if not xai_api_key and not openai_api_key:
+                logger.warning("No LLM API key available for intent classification")
+                return {
+                    "type": "unknown",
+                    "text": user_input.lower().strip(),
+                    "original": user_input,
+                }
+
+            # Create intent classification prompt
+            prompt = f"""
+You are an intelligent assistant for an e-commerce system. Classify the following user request into one of these categories:
+
+Categories:
+1. "create_product" - Creating new products in the catalog
+2. "create_customer" - Creating/registering new customer accounts (when explicitly asked to create a customer)
+3. "create_order" - Creating orders/purchases for existing or new customers (includes phrases like "order for", "buy", "purchase")
+4. "list_products" - Showing/listing products
+5. "list_customers" - Showing/listing customers
+6. "list_orders" - Showing/listing orders
+7. "search_products" - Searching for products
+8. "list_low_stock" - Showing low stock items
+9. "complex_operation" - Complex multi-step operations like setting up demo stores, analytics
+10. "help_request" - Asking for help or information about capabilities
+11. "unknown" - Cannot determine intent
+
+IMPORTANT: 
+- If the request mentions "order for [person]" or "order for [email]", it's "create_order", NOT "create_customer"
+- "create_customer" is only when explicitly asked to create/register a customer account
+- "create_order" includes purchasing products for someone, even if customer details are provided
+
+Examples:
+- "create an order for john@email.com for 2 pens" → create_order
+- "place order for jane doe for 3 laptops" → create_order  
+- "register new customer john smith" → create_customer
+- "add customer jane@email.com" → create_customer
+
+User request: "{user_input}"
+
+Respond with valid JSON only:
+{{
+    "type": "simple_query",
+    "action": "[one of the actions above]",
+    "original": "{user_input}",
+    "confidence": [0.0-1.0]
+}}
+
+For complex operations, use:
+{{
+    "type": "complex_operation", 
+    "operation": "[specific operation]",
+    "original": "{user_input}",
+    "confidence": [0.0-1.0]
+}}
+
+For help requests, use:
+{{
+    "type": "help_request",
+    "original": "{user_input}",
+    "confidence": [0.0-1.0]
+}}
+"""
+
+            # Try XAI/Grok first (preferred)
+            if xai_api_key:
+                try:
+                    from openai import AsyncOpenAI
+
+                    logger.info("Using XAI/Grok for intent classification")
+                    client = AsyncOpenAI(
+                        api_key=xai_api_key, base_url="https://api.x.ai/v1"
+                    )
+
+                    # Try different Grok model names
+                    grok_models = ["grok-3", "grok-2-1212", "grok-2", "grok-beta"]
+
+                    for model_name in grok_models:
+                        try:
+                            response = await client.chat.completions.create(
+                                model=model_name,
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": "You are an expert at understanding user intents in e-commerce contexts. Respond only with valid JSON.",
+                                    },
+                                    {"role": "user", "content": prompt},
+                                ],
+                                temperature=0.1,
+                                max_tokens=150,
+                            )
+
+                            # Parse the LLM response
+                            llm_output = response.choices[0].message.content.strip()
+                            logger.info(
+                                f"LLM intent classification response: {llm_output}"
+                            )
+
+                            parsed = self._parse_llm_response(llm_output)
+                            if parsed and parsed.get("confidence", 0) > 0.5:
+                                logger.info(f"LLM classified intent: {parsed}")
+                                return parsed
+                            break
+
+                        except Exception as model_error:
+                            logger.warning(
+                                f"XAI model {model_name} failed for intent classification: {model_error}"
+                            )
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error with XAI/Grok intent classification: {e}")
+
+            # Try OpenAI if XAI failed or isn't available
+            if openai_api_key:
+                try:
+                    from openai import AsyncOpenAI
+
+                    logger.info("Using OpenAI for intent classification")
+                    client = AsyncOpenAI(api_key=openai_api_key)
+
+                    response = await client.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert at understanding user intents in e-commerce contexts. Respond only with valid JSON.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.1,
+                        max_tokens=150,
+                    )
+
+                    # Parse the LLM response
+                    llm_output = response.choices[0].message.content.strip()
+                    logger.info(f"OpenAI intent classification response: {llm_output}")
+
+                    parsed = self._parse_llm_response(llm_output)
+                    if parsed and parsed.get("confidence", 0) > 0.5:
+                        logger.info(f"OpenAI classified intent: {parsed}")
+                        return parsed
+
+                except Exception as e:
+                    logger.error(f"Error with OpenAI intent classification: {e}")
+
+            # If all LLM attempts failed, return unknown
+            logger.warning("All LLM attempts failed for intent classification")
+            return {
+                "type": "unknown",
+                "text": user_input.lower().strip(),
+                "original": user_input,
+            }
+
+        except ImportError as e:
+            logger.error(f"OpenAI library not available for intent classification: {e}")
+            return {
+                "type": "unknown",
+                "text": user_input.lower().strip(),
+                "original": user_input,
+            }
+        except Exception as e:
+            logger.error(f"Error in LLM intent classification: {e}")
+            return {
+                "type": "unknown",
+                "text": user_input.lower().strip(),
+                "original": user_input,
+            }

@@ -72,7 +72,7 @@ Open http://localhost:8081/ and verify:
 - [ ] Click "👥 All Customers" → sends "List all customers"
 - [ ] Click "📋 Recent Orders" → sends "Show me recent orders"
 - [ ] Click "⚠️ Low Stock" → sends "What products are low in stock?"
-- [ ] Click "➕ New Product" → sends "Help me create a new product"
+- [ ] Click "➕ Help" → sends "Help me create a new product"
 
 ### ✅ Keyboard Tests:
 - [ ] Type message + press Enter → message sends

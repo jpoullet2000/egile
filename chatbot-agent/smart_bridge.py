@@ -203,7 +203,7 @@ class SmartChatbotBridge:
             }
             await websocket.send(json.dumps(error_msg))
 
-    async def start_server(self, host="localhost", port=8770):
+    async def start_server(self, host="0.0.0.0", port=8770):
         """Start the WebSocket server"""
         await self.start_agent()
 
